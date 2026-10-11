@@ -38,6 +38,9 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/consistent-type-imports': ['error', { fixStyle: 'inline-type-imports' }],
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      // AGENTS.md: noUncheckedIndexedAccess is not to be silenced with `!`.
+      // `recommended` already rejects `any` and `@ts-ignore`; this closes the third hole.
+      '@typescript-eslint/no-non-null-assertion': 'error',
     },
   },
 )
