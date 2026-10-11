@@ -247,6 +247,34 @@ describe('DockerSandbox', () => {
     assert.doesNotMatch(envFile, /secretpassword/)
   })
 
+  it('shadows the repository with a read-only mount so the container cannot rewrite it', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'adamant-sb-git-'))
+    fs.mkdirSync(path.join(workspace, '.git'))
+    let capturedArgs: string[] = []
+    const mockSpawn: SpawnFunction = (_cmd, args) => {
+      capturedArgs = args
+      return closeSoon(createMockProcess())
+    }
+
+    try {
+      const sandbox = new DockerSandbox({ spawnFn: mockSpawn })
+      await sandbox.run({ workspacePath: workspace, workdir: 'packages/app', command: 'true' })
+
+      const mounts = capturedArgs.filter((_arg, i) => capturedArgs[i - 1] === '--mount')
+      assert.deepEqual(mounts, [
+        `type=bind,src=${workspace},dst=/workspace`,
+        `type=bind,src=${path.join(workspace, '.git')},dst=/workspace/.git,readonly`,
+      ])
+
+      // A workspace without a repository (a bare directory of files) gets no overlay.
+      fs.rmSync(path.join(workspace, '.git'), { recursive: true })
+      await sandbox.run({ workspacePath: workspace, command: 'true' })
+      assert.equal(capturedArgs.filter((arg) => arg.includes('.git')).length, 0)
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
   it('sets custom workdir inside workspace and blocks path traversal', async () => {
     let capturedArgs: string[] = []
     const mockSpawn: SpawnFunction = (_cmd, args) => {

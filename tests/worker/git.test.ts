@@ -331,6 +331,22 @@ describe('GitWorkspace against real git', () => {
     assert.deepEqual(files.stdout.trim().split('\n'), ['src/sum.ts'])
   })
 
+  it('never runs a hook the shared worktree picked up', async () => {
+    const { dir, ws } = await repoWithBase()
+    await ws.applyPatch(fix)
+    // What a test or postinstall script in the sandbox could leave behind.
+    const marker = path.join(dir, 'hook-ran')
+    await fs.writeFile(
+      path.join(dir, '.git/hooks/pre-commit'),
+      `#!/bin/sh\ntouch "${marker}"\nexit 1\n`,
+      { mode: 0o755 },
+    )
+
+    await ws.commitCandidate('fix: sum')
+
+    await assert.rejects(fs.access(marker))
+  })
+
   it('survives a git child that exits before reading its stdin', async () => {
     const dir = await tempDir()
     // `--version` never reads stdin, so a pipe-buffer's worth of input is

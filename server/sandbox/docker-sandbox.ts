@@ -16,6 +16,14 @@ const FORBIDDEN_SECRET_KEYS = [
   'COOKIE',
 ]
 
+function isDirectory(target: string): boolean {
+  try {
+    return fs.statSync(target).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 export class DockerSandbox {
   private defaultImage: string
   private defaultTimeoutMs: number
@@ -131,6 +139,20 @@ export class DockerSandbox {
       '-w',
       targetWorkdir,
     ]
+
+    // The worktree must stay writable (installs and tests write to it), but
+    // the repository under it must not: the host runs `git commit` and `git
+    // push` against this `.git` after the container exits, so a test or a
+    // postinstall script that rewrote `.git/config` (remote URL, http.proxy,
+    // hooksPath) or the index would steer the host's push, and the
+    // installation token, wherever it liked. Docker applies nested mounts
+    // innermost last, so this bind shadows `.git` inside the workspace mount.
+    if (isDirectory(path.join(resolvedPath, '.git'))) {
+      dockerArgs.push(
+        '--mount',
+        `type=bind,src=${path.join(resolvedPath, '.git')},dst=/workspace/.git,readonly`,
+      )
+    }
 
     let envFilePath: string | null = null
     if (options.env && Object.keys(options.env).length > 0) {

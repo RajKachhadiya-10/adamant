@@ -346,6 +346,12 @@ export class GitWorkspace {
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_ADVICE: '0',
+      // Hooks run on this host, outside the sandbox, with the askpass token
+      // in reach. The worktree is shared with the container, so nothing that
+      // ends up under `.git/hooks` or in `core.hooksPath` may execute here.
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'core.hooksPath',
+      GIT_CONFIG_VALUE_0: '/dev/null',
     }
 
     if (options?.authenticated) {
