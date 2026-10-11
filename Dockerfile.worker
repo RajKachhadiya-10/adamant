@@ -38,6 +38,8 @@ COPY server/worker server/worker
 COPY server/agent server/agent
 COPY server/sandbox server/sandbox
 COPY server/db server/db
+# The hourly cleanup_oauth_states task runs the API's authService query.
+COPY server/api server/api
 
 WORKDIR /app/server
 
