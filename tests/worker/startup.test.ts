@@ -265,6 +265,27 @@ describe('worker', () => {
     assert.deepEqual(disposed, ['configuration failed'])
   })
 
+  it('marks the run failed when the run tools cannot be built on the last attempt', async () => {
+    const finished: string[] = []
+
+    await assert.rejects(
+      () =>
+        graphStep(
+          { runId: 'run-1' },
+          { logger: { info: () => {} }, job: { attempts: 3, max_attempts: 3 } },
+          deps({
+            createTools: () => {
+              throw new Error('workspace root is not writable')
+            },
+            markFinished: async (_runId, status) => void finished.push(status),
+          }),
+        ),
+      /workspace root is not writable/,
+    )
+
+    assert.deepEqual(finished, ['failed'])
+  })
+
   it('builds the run tools from the loaded run, not from the payload', async () => {
     const { client } = recordingClient()
     const seen: HealRun[] = []
