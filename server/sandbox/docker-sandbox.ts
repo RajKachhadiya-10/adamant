@@ -5,6 +5,9 @@ import * as os from 'node:os'
 import type { SandboxExecutionOptions, SandboxResult, SpawnFunction } from './types.ts'
 
 const MAX_BUFFER_BYTES = 512 * 1024 // 512KB bounded tail
+/** Set on every container so leftovers can be found by run, whoever started them. */
+const RUN_LABEL = 'adamant.run'
+const CLI_TIMEOUT_MS = 30_000
 const FORBIDDEN_SECRET_KEYS = [
   'TOKEN',
   'SECRET',
@@ -37,6 +40,49 @@ export class DockerSandbox {
     this.defaultImage = options?.defaultImage ?? 'node:22-bookworm-slim'
     this.defaultTimeoutMs = options?.defaultTimeoutMs ?? 60000
     this.spawnFn = options?.spawnFn ?? ((cmd, args) => spawn(cmd, args))
+  }
+
+  /**
+   * Force-removes every container this class started for `runId`. The daemon
+   * outlives the worker: a worker killed mid-test leaves its container
+   * running with no timeout left to stop it, and a `docker rm -f` on the
+   * timeout path can fail unnoticed. Called before a run's first container
+   * and when the run is disposed. Never throws; the daemon may be gone.
+   */
+  async removeRunContainers(runId: string): Promise<void> {
+    const listed = await this.docker(['ps', '-aq', '--filter', `label=${RUN_LABEL}=${runId}`])
+    const ids = listed.split(/\s+/).filter((id) => id.length > 0)
+    if (ids.length === 0) return
+    await this.docker(['rm', '-f', ...ids])
+  }
+
+  /** stdout of a short docker CLI call, or '' when it fails or hangs. */
+  private docker(args: string[]): Promise<string> {
+    return new Promise((resolve) => {
+      let proc: ChildProcess
+      try {
+        proc = this.spawnFn('docker', args)
+      } catch {
+        return resolve('')
+      }
+      let stdout = ''
+      const timer = setTimeout(() => {
+        proc.kill('SIGKILL')
+        resolve('')
+      }, CLI_TIMEOUT_MS)
+      proc.stdout?.setEncoding('utf8')
+      proc.stdout?.on('data', (chunk: string) => {
+        stdout += chunk
+      })
+      proc.on('error', () => {
+        clearTimeout(timer)
+        resolve('')
+      })
+      proc.on('close', (code: number | null) => {
+        clearTimeout(timer)
+        resolve(code === 0 ? stdout : '')
+      })
+    })
   }
 
   async run(options: SandboxExecutionOptions): Promise<SandboxResult> {
@@ -118,6 +164,8 @@ export class DockerSandbox {
       '--rm',
       '--name',
       containerName,
+      '--label',
+      `${RUN_LABEL}=${runId}`,
       '--network',
       network,
       '--cap-drop',

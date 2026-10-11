@@ -23,7 +23,13 @@ export interface SandboxRunnerOptions {
   readonly image?: string
   readonly timeoutMs?: number
   readonly installTimeoutMs?: number
-  readonly sandbox?: Pick<DockerSandbox, 'run'>
+  readonly sandbox?: Pick<DockerSandbox, 'run'> &
+    Partial<Pick<DockerSandbox, 'removeRunContainers'>>
+}
+
+export interface DockerSandboxProvider extends SandboxProvider {
+  /** Removes any container still running for this run. Call it when the run ends. */
+  dispose(): Promise<void>
 }
 
 const MAX_OUTPUT_CHARS = 16_000
@@ -105,14 +111,22 @@ function verdictFor(result: SandboxResult): SandboxOutcome['verdict'] {
   return result.success ? 'pass' : 'fail'
 }
 
-export function createDockerSandboxProvider(options: SandboxRunnerOptions): SandboxProvider {
+export function createDockerSandboxProvider(options: SandboxRunnerOptions): DockerSandboxProvider {
   const docker = options.sandbox ?? new DockerSandbox()
   const commands = [options.installCommand, options.testCommand].filter(
     (command): command is string => Boolean(command && command.trim()),
   )
 
-  const execute = (command: string, extra: Partial<SandboxExecutionOptions>) =>
-    docker.run({
+  // A retry of this run may find the previous worker's container still
+  // running in the worktree: the daemon outlived the worker that started it.
+  // It is removed once, before this run's first container.
+  let cleared: Promise<void> | null = null
+  const clearLeftovers = () =>
+    (cleared ??= docker.removeRunContainers?.(options.runId) ?? Promise.resolve())
+
+  const execute = async (command: string, extra: Partial<SandboxExecutionOptions>) => {
+    await clearLeftovers()
+    return docker.run({
       runId: options.runId,
       workspacePath: options.workspacePath,
       ...(options.workdir ? { workdir: options.workdir } : {}),
@@ -120,6 +134,7 @@ export function createDockerSandboxProvider(options: SandboxRunnerOptions): Sand
       ...(options.image === undefined ? {} : { image: options.image }),
       ...extra,
     })
+  }
 
   const installDir = workdirPath(options.workspacePath, options.workdir)
   let installed: InstallRecord | null = null
@@ -174,6 +189,10 @@ export function createDockerSandboxProvider(options: SandboxRunnerOptions): Sand
       }
 
       return runTests()
+    },
+
+    async dispose() {
+      await docker.removeRunContainers?.(options.runId)
     },
   }
 
