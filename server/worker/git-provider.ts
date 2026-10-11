@@ -1,6 +1,6 @@
 import { type GitProvider, type PullRequestRef } from '../agent/deps.ts'
 import { type GitHubClient } from './github.ts'
-import { type GitWorkspace } from './git.ts'
+import { GitDeniedError, type GitWorkspace } from './git.ts'
 
 /**
  * The concrete GitProvider: a per-run worktree for the code, the GitHub App
@@ -49,6 +49,12 @@ export function createGitHubGitProvider(
     },
 
     async openPr(branch, base, title, body): Promise<PullRequestRef> {
+      // The gateway checks this too. Here it is the last line before GitHub.
+      if (branch !== workspace.agentBranch) {
+        throw new GitDeniedError(
+          `Unauthorized PR from ${branch}. Allowed: ${workspace.agentBranch}`,
+        )
+      }
       return github.createPullRequest({ ...repo, head: branch, base, title, body })
     },
 
@@ -56,6 +62,7 @@ export function createGitHubGitProvider(
       await github.mergePullRequest({
         ...repo,
         prNumber,
+        headRef: workspace.agentBranch,
         commitTitle: `Adamant run ${context.runId} (#${prNumber})`,
       })
     },

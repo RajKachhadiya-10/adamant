@@ -57,13 +57,25 @@ export interface GitHubClient {
     title: string
     body: string
   }): Promise<{ number: number; url: string }>
+  /**
+   * Merges `prNumber` only if its head is `headRef` on this repository and
+   * it is still open. The number alone is not proof it is this run's PR.
+   */
   mergePullRequest(input: {
     installationId: string
     owner: string
     name: string
     prNumber: number
+    headRef: string
     commitTitle: string
   }): Promise<void>
+}
+
+/** Read back before a merge. Anything else on the PR is ignored. */
+interface PullRequestHead {
+  readonly state: string
+  readonly merged: boolean
+  readonly head: { readonly ref: string; readonly repo: { readonly full_name: string } | null }
 }
 
 export class GitHubApiError extends Error {
@@ -203,9 +215,26 @@ export function createGitHubClient(config: GitHubAppConfig, fetchImpl?: FetchLik
       return { number: pr.number, url: pr.html_url }
     },
 
-    async mergePullRequest({ installationId, owner, name, prNumber, commitTitle }) {
+    async mergePullRequest({ installationId, owner, name, prNumber, headRef, commitTitle }) {
       const token = await client.installationToken(installationId)
       const repo = `${encodeURIComponent(owner)}/${encodeURIComponent(name)}`
+
+      // The run's own PR has this head on this repo. A PR number is a small
+      // integer that could name anyone's PR, so the head is read back and
+      // checked here before the merge goes out, not taken on trust.
+      const pr = await json<PullRequestHead>(token, 'GET', `/repos/${repo}/pulls/${prNumber}`)
+      const headRepo = pr.head.repo?.full_name.toLowerCase() ?? null
+      if (pr.head.ref !== headRef || headRepo !== `${owner}/${name}`.toLowerCase()) {
+        throw new Error(
+          `Refusing to merge PR #${prNumber}: its head is ${headRepo ?? '(deleted)'}:${pr.head.ref}, not ${owner}/${name}:${headRef}.`,
+        )
+      }
+      if (pr.state !== 'open' || pr.merged) {
+        throw new Error(
+          `Refusing to merge PR #${prNumber}: it is ${pr.merged ? 'merged' : pr.state}.`,
+        )
+      }
+
       await json(token, 'PUT', `/repos/${repo}/pulls/${prNumber}/merge`, {
         merge_method: 'squash',
         commit_title: commitTitle,
