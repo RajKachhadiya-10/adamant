@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { AppInfo } from '@adamant/shared'
+import { loadAppInfo } from './bridge'
 import { TitleBar } from './components/TitleBar'
 
 export function App() {
@@ -9,8 +10,7 @@ export function App() {
   useEffect(() => {
     let cancelled = false
 
-    window.adamant
-      .getAppInfo()
+    loadAppInfo(window.adamant)
       .then((result) => {
         if (!cancelled) setInfo(result)
       })

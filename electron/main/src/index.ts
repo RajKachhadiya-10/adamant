@@ -1,5 +1,5 @@
-import { app, BrowserWindow, shell } from 'electron'
-import { externalUrl } from '@adamant/shared'
+import { app, BrowserWindow, session, shell } from 'electron'
+import { denyPermissions, guardNavigation } from './harden.mjs'
 import { registerIpcHandlers } from './ipc'
 import { createMainWindow } from './window'
 
@@ -15,9 +15,12 @@ if (!app.requestSingleInstanceLock()) {
     window.focus()
   })
 
-  hardenWebContents()
+  app.on('web-contents-created', (_event, contents) => {
+    guardNavigation(contents, (href) => shell.openExternal(href))
+  })
 
   app.whenReady().then(() => {
+    denyPermissions(session.defaultSession)
     registerIpcHandlers()
     createMainWindow()
 
@@ -29,30 +32,5 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit()
-  })
-}
-
-function openInBrowser(url: string): void {
-  const href = externalUrl(url)
-  if (href) void shell.openExternal(href)
-}
-
-/**
- * Renderer content must never be able to navigate the app frame elsewhere or
- * spawn unaudited windows; external links go to the user's real browser.
- */
-function hardenWebContents(): void {
-  app.on('web-contents-created', (_event, contents) => {
-    contents.on('will-navigate', (event, url) => {
-      if (url !== contents.getURL()) {
-        event.preventDefault()
-        openInBrowser(url)
-      }
-    })
-
-    contents.setWindowOpenHandler(({ url }) => {
-      openInBrowser(url)
-      return { action: 'deny' }
-    })
   })
 }
