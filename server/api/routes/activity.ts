@@ -10,8 +10,15 @@ import {
 // every reconnect replays history. A comment frame keeps the stream open.
 const DEFAULT_HEARTBEAT_MS = 20_000
 
+// Ids already sent are kept so a live event that was also in the history
+// replay goes out once. That overlap is at most a replay's worth of events;
+// remembering every id for the life of an `adamant watch` grew without bound.
+const DEFAULT_DEDUPE_WINDOW = 2_000
+
 export type ActivityRouteOptions = {
   heartbeatMs?: number
+  /** How many recently sent event ids a connection remembers. */
+  dedupeWindow?: number
 }
 
 /**
@@ -23,6 +30,7 @@ export function createActivityRoute(service?: ActivityService, options: Activity
   const activity = new Hono()
   const activityService = service ?? createActivityService()
   const heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
+  const dedupeWindow = options.dedupeWindow ?? DEFAULT_DEDUPE_WINDOW
 
   activity.get('/', async (c) => {
     const lastEventId = c.req.header('last-event-id') ?? c.req.query('lastEventId') ?? null
@@ -50,10 +58,19 @@ export function createActivityRoute(service?: ActivityService, options: Activity
         }
       }
 
+      // Insertion-ordered, so the oldest id is the first one iterated.
       const sentEventIds = new Set<string>()
       const liveQueue: ActivityEvent[] = []
       let historyLoaded = false
       let isFlushing = false
+
+      const remember = (id: string) => {
+        sentEventIds.add(id)
+        if (sentEventIds.size > dedupeWindow) {
+          const oldest = sentEventIds.values().next().value
+          if (oldest !== undefined) sentEventIds.delete(oldest)
+        }
+      }
 
       const safeWrite = async (event: ActivityEvent): Promise<boolean> => {
         if (!active) return false
@@ -64,7 +81,7 @@ export function createActivityRoute(service?: ActivityService, options: Activity
             event: event.type,
             data: JSON.stringify(event.payload),
           })
-          sentEventIds.add(event.id)
+          remember(event.id)
           return true
         } catch {
           cleanup()
