@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import { afterEach, describe, it } from 'node:test'
 import { type RunSummary } from '@adamant/contract'
-import { createServerApp } from '../../server/api/server.ts'
+import { createServerApp, shutdownGracefully } from '../../server/api/server.ts'
 import { type RunApiStore } from '../../server/api/services/runStore.ts'
 
 const session = 'secret'
@@ -111,5 +111,48 @@ describe('composed API', () => {
     })
 
     assert.equal(response.status, 202)
+  })
+})
+
+describe('graceful shutdown', () => {
+  function fakeServer() {
+    const calls: string[] = []
+    let onClosed: ((error?: Error) => void) | undefined
+    const server = {
+      close(callback?: (error?: Error) => void) {
+        calls.push('close')
+        onClosed = callback
+      },
+      closeIdleConnections() {
+        calls.push('closeIdleConnections')
+      },
+      closeAllConnections() {
+        calls.push('closeAllConnections')
+      },
+    }
+    return { server, calls, closed: (error?: Error) => onClosed?.(error) }
+  }
+
+  it('stops listening, lets in-flight requests finish, then exits', () => {
+    const { server, calls, closed } = fakeServer()
+    let exitCode: number | undefined
+    shutdownGracefully(server, { timeoutMs: 10_000, exit: (code) => (exitCode = code) })
+
+    assert.deepEqual(calls, ['close', 'closeIdleConnections'])
+    assert.equal(exitCode, undefined, 'waits for the server to drain')
+
+    closed()
+    assert.equal(exitCode, 0)
+  })
+
+  it('cuts connections still open at the deadline, such as SSE streams', async () => {
+    const { server, calls } = fakeServer()
+    let exits = 0
+    shutdownGracefully(server, { timeoutMs: 5, exit: () => (exits += 1) })
+
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    assert.ok(calls.includes('closeAllConnections'))
+    assert.equal(exits, 1)
   })
 })

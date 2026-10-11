@@ -101,3 +101,54 @@ export function createServerApp(runStore?: RunApiStore, options: ServerOptions =
 }
 
 export type ApiType = ReturnType<typeof createServerApp>
+
+/** The parts of `node:http.Server` a shutdown needs; HTTP/2 servers lack the last two. */
+export type ClosableServer = {
+  close(callback?: (error?: Error) => void): unknown
+  closeIdleConnections?(): void
+  closeAllConnections?(): void
+}
+
+export type ShutdownOptions = {
+  /** How long in-flight requests and open streams get before they are cut. */
+  timeoutMs?: number
+  exit?: (code: number) => void
+}
+
+// Orchestrators send SIGTERM and wait about 30 s before SIGKILL; leave margin.
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000
+
+/**
+ * Stops accepting connections, lets in-flight requests finish, then exits.
+ * `/activity` streams never finish on their own, so whatever is still open
+ * at the deadline is cut; node-server aborts those streams, which unsubscribes
+ * them. Without this a SIGTERM killed the process mid-webhook, and GitHub does
+ * not redeliver on its own.
+ */
+export function shutdownGracefully(server: ClosableServer, options: ShutdownOptions = {}) {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS
+  const exit = options.exit ?? ((code: number) => process.exit(code))
+  let finished = false
+  const finish = (code: number) => {
+    if (finished) return
+    finished = true
+    clearTimeout(deadline)
+    exit(code)
+  }
+  const deadline = setTimeout(() => {
+    server.closeAllConnections?.()
+    finish(0)
+  }, timeoutMs)
+  deadline.unref()
+
+  server.close((error) => finish(error ? 1 : 0))
+  // Keep-alive connections with no request in flight would otherwise hold
+  // `close` open until the client's idle timeout.
+  server.closeIdleConnections?.()
+}
+
+export function installShutdownHandlers(server: ClosableServer, options: ShutdownOptions = {}) {
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(signal, () => shutdownGracefully(server, options))
+  }
+}

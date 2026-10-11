@@ -1,6 +1,6 @@
 import { serve } from '@hono/node-server'
 import { runMigrations } from 'graphile-worker'
-import { createServerApp, type ApiType } from './server.ts'
+import { createServerApp, installShutdownHandlers, type ApiType } from './server.ts'
 
 export type { ApiType }
 
@@ -16,6 +16,8 @@ if (connectionString) {
 
 const app = createServerApp()
 
-serve({ fetch: app.fetch, port }, (info) => {
+const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`@adamant/api listening on http://localhost:${info.port}`)
 })
+
+installShutdownHandlers(server)
