@@ -1,6 +1,28 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { ActivityEventEnvelopeSchema, RunDetailSchema, RunSummarySchema } from '@adamant/contract'
+import { getTableConfig } from 'drizzle-orm/pg-core'
+import {
+  ActivityEventEnvelopeSchema,
+  RunDetailSchema,
+  RunStatusSchema,
+  RunSummarySchema,
+} from '@adamant/contract'
+import { runs } from '../server/db/schema/runs.ts'
+
+/** The quoted values of a `col in ('a','b')` check, as drizzle renders it. */
+function checkValues(name: string): string[] {
+  const check = getTableConfig(runs).checks.find((candidate) => candidate.name === name)
+  assert.ok(check, `${name} is not a check on runs`)
+  // Literal SQL arrives as StringChunk { value: string[] }; the column chunk is skipped.
+  const rendered = check.value.queryChunks
+    .map((chunk) =>
+      typeof chunk === 'object' && 'value' in chunk && Array.isArray(chunk.value)
+        ? chunk.value.join('')
+        : '',
+    )
+    .join('')
+  return [...rendered.matchAll(/'([^']+)'/g)].map((match) => match[1] ?? '')
+}
 
 const run = {
   id: 'run-1',
@@ -23,6 +45,12 @@ const auditEvent = {
 } as const
 
 describe('@adamant/contract', () => {
+  // toRunSummary parses every row through RunStatusSchema, so a status the
+  // database accepts but the contract does not turns GET /runs into a 500.
+  it('lists exactly the run statuses the runs table accepts', () => {
+    assert.deepEqual([...RunStatusSchema.options].sort(), checkValues('runs_status_check').sort())
+  })
+
   it('accepts valid run summaries and run details', () => {
     assert.deepEqual(RunSummarySchema.parse(run), run)
     assert.deepEqual(RunDetailSchema.parse({ run, auditEvents: [auditEvent] }), {
