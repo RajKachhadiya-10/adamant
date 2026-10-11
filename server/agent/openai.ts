@@ -5,6 +5,7 @@ import { compileHealGraph } from './graph.ts'
 import {
   type GitProvider,
   type LlmProvider,
+  LlmTruncatedError,
   type PreviousAttempt,
   type SandboxProvider,
   type SourceExcerpt,
@@ -33,7 +34,12 @@ const HEAL_INSTRUCTIONS_PROMPT = [
 ].join('\n')
 
 export type OpenAiResponses = {
-  create(body: ResponseCreateParamsNonStreaming): Promise<{ output_text: string }>
+  create(body: ResponseCreateParamsNonStreaming): Promise<{
+    output_text: string
+    status?: string
+    incomplete_details?: { reason?: string } | null
+    error?: { message: string } | null
+  }>
 }
 
 export type OpenAiLlmOptions = {
@@ -80,9 +86,7 @@ function describeAttempt(attempt: PreviousAttempt | null): string {
     `Candidate ${attempt.attemptNumber} was already tried and rejected.`,
     'Why it failed:',
     tail(attempt.failure),
-    '',
-    'The rejected diff:',
-    tail(attempt.patch),
+    ...(attempt.patch ? ['', 'The rejected diff:', tail(attempt.patch)] : []),
     '',
     'Find a different cause or a different fix.',
   ].join('\n')
@@ -107,6 +111,14 @@ async function complete(
     // CI logs can contain secrets. Do not retain the prompt with OpenAI.
     store: false,
   })
+  if (response.error) {
+    throw new Error(`OpenAI heal call failed: ${response.error.message}`)
+  }
+  // A reply cut off at the output limit still carries output_text. For the
+  // patch step that is a fragment of a diff, which applies as garbage.
+  if (response.status === 'incomplete') {
+    throw new LlmTruncatedError(response.incomplete_details?.reason ?? 'unknown reason')
+  }
   const text = response.output_text.trim()
   if (!text) {
     throw new Error('OpenAI returned an empty heal response')

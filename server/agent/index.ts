@@ -12,6 +12,7 @@ export {
   type SandboxProvider,
   type SandboxOutcome,
   type LlmProvider,
+  LlmTruncatedError,
   type PreviousAttempt,
   type PullRequestRef,
   type SourceExcerpt,

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { type AgentState } from './state.ts'
-import { type AgentDependencies, type PreviousAttempt } from './deps.ts'
+import { type AgentDependencies, LlmTruncatedError, type PreviousAttempt } from './deps.ts'
 import { SecureGitClient } from './tools.ts'
 import { parseFailure } from './triage.ts'
 import { buildCommitMessage, buildPrBody, buildPrTitle } from './pr.ts'
@@ -16,13 +16,14 @@ const candidateHash = (patch: string) => createHash('sha256').update(patch).dige
  * what makes the loop converge instead of repeating itself.
  */
 function previousAttempt(state: AgentState): PreviousAttempt | null {
-  if (state.attemptNumber < 1 || !state.candidatePatch || !state.lastAttemptFailure) {
+  if (state.attemptNumber < 1 || !state.lastAttemptFailure) {
     return null
   }
 
+  // Empty when the reply never became a diff (cut off); the failure says so.
   return {
     attemptNumber: state.attemptNumber,
-    patch: state.candidatePatch,
+    patch: state.candidatePatch ?? '',
     failure: state.lastAttemptFailure,
   }
 }
@@ -87,17 +88,39 @@ export const createNodes = (deps: AgentDependencies) => {
         throw new Error('Plan missing before patching phase')
       }
 
-      const patch = normalizePatch(
-        await deps.llm.patch({
+      const attemptNumber = state.attemptNumber + 1
+      let reply: string
+      try {
+        reply = await deps.llm.patch({
           failure: state.failure,
           sources: state.sources,
           diagnostics: state.diagnostics,
           plan: state.plan,
           previousAttempt: previousAttempt(state),
-        }),
-      )
+        })
+      } catch (error) {
+        // A reply the model did not finish is a spent attempt with a known
+        // cause, not a crashed run; anything else is still one.
+        if (!(error instanceof LlmTruncatedError)) throw error
+        await deps.recorder.patchAttempt({
+          attemptNumber,
+          candidateHash: candidateHash(''),
+          patchDiff: '',
+          outcome: 'generation_error',
+          failureReason: error.message,
+        })
 
-      const attemptNumber = state.attemptNumber + 1
+        return {
+          attemptNumber,
+          candidatePatch: null,
+          candidateHash: null,
+          lastAttemptFailure: `${error.message} Write a smaller diff that changes only what the plan needs.`,
+          sandboxResult: null,
+          status: 'diagnosing',
+        }
+      }
+
+      const patch = normalizePatch(reply)
       const hash = candidateHash(patch)
 
       // The same bytes the sandbox already rejected would only fail again, and

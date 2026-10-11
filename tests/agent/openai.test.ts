@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import type { ResponseCreateParamsNonStreaming } from 'openai/resources/responses/responses'
-import { type GitProvider, type SandboxProvider } from '../../server/agent/deps.ts'
+import {
+  type GitProvider,
+  LlmTruncatedError,
+  type SandboxProvider,
+} from '../../server/agent/deps.ts'
 import { createMemoryRecorder } from '../../server/agent/recorder.ts'
 import {
   compileOpenAiHealGraph,
@@ -79,6 +83,47 @@ describe('OpenAI heal model', () => {
       if (previousKey === undefined) delete process.env.OPENAI_API_KEY
       else process.env.OPENAI_API_KEY = previousKey
     }
+  })
+
+  it('rejects a reply the model did not finish instead of returning the fragment', async () => {
+    const client: OpenAiResponses = {
+      create: async () => ({
+        output_text: '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-x',
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_output_tokens' },
+      }),
+    }
+
+    await assert.rejects(
+      createOpenAiLlm({ client }).patch({
+        failure: { firstError: null, location: null, failingTests: [], excerpt: '' },
+        sources: [],
+        diagnostics: 'd',
+        plan: 'p',
+        previousAttempt: null,
+      }),
+      (error: unknown) =>
+        error instanceof LlmTruncatedError && /cut off .*max_output_tokens/.test(error.message),
+    )
+  })
+
+  it('surfaces a failed response instead of reporting an empty reply', async () => {
+    const client: OpenAiResponses = {
+      create: async () => ({
+        output_text: '',
+        status: 'failed',
+        error: { message: 'server_error: try again' },
+      }),
+    }
+
+    await assert.rejects(
+      createOpenAiLlm({ client }).diagnose({
+        failure: { firstError: null, location: null, failingTests: [], excerpt: '' },
+        sources: [],
+        previousAttempt: null,
+      }),
+      /server_error: try again/,
+    )
   })
 
   it('runs diagnose and plan at low effort and the patch at high effort', async () => {
