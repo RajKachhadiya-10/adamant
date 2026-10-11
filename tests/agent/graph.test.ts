@@ -73,6 +73,9 @@ describe('Agent System LangGraph Core', () => {
       sandboxCalls++
       return { verdict: 'fail', commands: [], output: 'still red' }
     }
+    // A repeat of the rejected diff is not validated again, so each try differs.
+    let patchCalls = 0
+    deps.llm.patch = async () => `patch-${++patchCalls}`
 
     const graph = compileHealGraph(deps)
     const finalState = await graph.invoke({

@@ -100,6 +100,27 @@ export const createNodes = (deps: AgentDependencies) => {
       const attemptNumber = state.attemptNumber + 1
       const hash = candidateHash(patch)
 
+      // The same bytes the sandbox already rejected would only fail again, and
+      // a sandbox run is the most expensive step there is. Spend the attempt
+      // without it and say so, since the feedback evidently did not land.
+      if (state.lastAttemptFailure && hash === state.candidateHash) {
+        const failureReason = `identical to rejected candidate ${state.attemptNumber}`
+        await deps.recorder.patchAttempt({
+          attemptNumber,
+          candidateHash: hash,
+          patchDiff: patch,
+          outcome: 'generation_error',
+          failureReason,
+        })
+
+        return {
+          attemptNumber,
+          lastAttemptFailure: `${state.lastAttemptFailure}\n\nCandidate ${attemptNumber} repeated this diff byte for byte and was not run.`,
+          sandboxResult: null,
+          status: 'diagnosing',
+        }
+      }
+
       try {
         await gateway(state).applyPatch(patch)
       } catch (error) {
