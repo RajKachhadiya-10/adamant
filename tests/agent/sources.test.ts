@@ -22,6 +22,35 @@ describe('normalizePatch', () => {
   it('drops a sentence before an unfenced diff', () => {
     assert.equal(normalizePatch(`The fix:\n${diff}`), diff)
   })
+
+  it('picks the fenced block that holds the diff, not the first fence', () => {
+    const reply = `The bug:\n\n\`\`\`ts\nreturn a - b\n\`\`\`\n\nThe fix:\n\n\`\`\`diff\n${diff}\`\`\`\n`
+    assert.equal(normalizePatch(reply), diff)
+  })
+
+  it('joins one fenced diff per file into a single patch', () => {
+    const second = '--- a/src/mul.ts\n+++ b/src/mul.ts\n@@ -1 +1 @@\n-c\n+d\n'
+    const reply = `\`\`\`diff\n${diff}\`\`\`\n\nAnd:\n\n\`\`\`diff\n${second}\`\`\`\n`
+    assert.equal(normalizePatch(reply), diff + second)
+  })
+
+  it('does not end the fence at a fence line inside a diff of a Markdown file', () => {
+    const readme = [
+      '--- a/README.md',
+      '+++ b/README.md',
+      '@@ -1 +1,4 @@',
+      ' # Title',
+      '+```sh',
+      '+pnpm test',
+      '+```',
+      '',
+    ].join('\n')
+    assert.equal(normalizePatch(`\`\`\`diff\n${readme}\`\`\``), readme)
+  })
+
+  it('normalizes CRLF line endings, which apply rejects against an LF file', () => {
+    assert.equal(normalizePatch(diff.replace(/\n/g, '\r\n')), diff)
+  })
 })
 
 describe('findLocations', () => {
@@ -51,6 +80,59 @@ describe('readSources', () => {
     assert.equal(source?.startLine, 90)
     assert.equal(source?.text.split('\n')[0], 'line 90')
     assert.equal(source?.text.split('\n').at(-1), 'line 200')
+  })
+
+  it('keeps the failing line when the lines before it are long', async () => {
+    const wide = Array.from({ length: 200 }, (_, index) => `line ${index + 1} ${'x'.repeat(300)}`)
+    const failure = parseFailure('Error: boom\n    at run (src/wide.ts:100:3)')
+    const [source] = await readSources(
+      async () => ({ path: 'src/wide.ts', text: wide.join('\n') }),
+      failure,
+    )
+
+    assert.ok(source, 'the file is shown')
+    assert.ok(source.text.length <= 8_000)
+    const shown = source.text.split('\n')
+    assert.ok(shown.includes(wide[99] ?? ''), 'line 100 is in the window')
+    assert.equal(shown[0], wide[source.startLine - 1], 'startLine names the first line shown')
+    assert.ok(
+      shown.every((line) => wide.includes(line)),
+      'no line is cut mid-way',
+    )
+  })
+
+  it('shows the end of the file when the log names a line past it', async () => {
+    const failure = parseFailure('Error: boom\n    at run (src/short.ts:900:3)')
+    const [source] = await readSources(
+      async () => ({ path: 'src/short.ts', text: 'first\nsecond\nthird\n' }),
+      failure,
+    )
+
+    assert.equal(source?.startLine, 1)
+    assert.equal(source?.text, 'first\nsecond\nthird')
+  })
+
+  it('redacts a key block the window cuts through and keeps line numbers', async () => {
+    const key = [
+      '-----BEGIN PRIVATE KEY-----',
+      ...Array.from({ length: 30 }, () => 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7'),
+      '-----END PRIVATE KEY-----',
+    ]
+    const text = [
+      ...Array.from({ length: 70 }, (_, index) => `line ${index + 1}`),
+      ...key,
+      ...Array.from({ length: 70 }, (_, index) => `line ${index + 103}`),
+    ].join('\n')
+    const failure = parseFailure('Error: boom\n    at run (src/keys.ts:20:3)')
+    const [source] = await readSources(async () => ({ path: 'src/keys.ts', text }), failure)
+
+    assert.equal(
+      source?.text.includes('MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7'),
+      false,
+    )
+    assert.equal(source?.text.includes('BEGIN PRIVATE KEY'), false)
+    assert.equal(source?.startLine, 1)
+    assert.equal(source?.text.split('\n')[70], '[redacted]', 'line 71 is still line 71')
   })
 
   it('skips files it cannot find or read and still returns the rest', async () => {

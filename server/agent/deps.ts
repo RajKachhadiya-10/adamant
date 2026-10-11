@@ -56,6 +56,18 @@ export interface PreviousAttempt {
   readonly failure: string
 }
 
+/**
+ * The model stopped before it finished (output limit, content filter). The
+ * text is not usable as a diff, so a provider throws this rather than return
+ * the fragment; patchNode spends the attempt on it and tells the model why.
+ */
+export class LlmTruncatedError extends Error {
+  constructor(reason: string) {
+    super(`The model reply was cut off before it finished (${reason}).`)
+    this.name = 'LlmTruncatedError'
+  }
+}
+
 export interface LlmProvider {
   diagnose(input: {
     failure: FailureContext

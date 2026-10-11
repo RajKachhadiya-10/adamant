@@ -63,9 +63,16 @@ const SECRET_VALUE_SHAPES: readonly RegExp[] = [
 
 const REDACTED = '[redacted]'
 
-/** Masks secret-shaped values anywhere in free text (logs, model output, PR bodies). */
+/**
+ * Masks secret-shaped values anywhere in free text (logs, model output, PR
+ * bodies). A secret spanning lines keeps its line count, so a `file:line`
+ * read off the redacted text still points at the right line.
+ */
 export function redactText(value: string): string {
-  return SECRET_VALUE_SHAPES.reduce((text, shape) => text.replace(shape, REDACTED), value)
+  return SECRET_VALUE_SHAPES.reduce(
+    (text, shape) => text.replace(shape, (match) => REDACTED + match.replace(/[^\n]/g, '')),
+    value,
+  )
 }
 
 function redactString(value: string): string {

@@ -16,6 +16,9 @@ export interface FailureContext {
 }
 
 const MAX_EXCERPT_CHARS = 6_000
+const MAX_FIRST_ERROR_CHARS = 1_000
+/** A line longer than this is a dump (a bundle, a serialized object), not a diagnostic. */
+const MAX_LINE_CHARS = 4_000
 const MAX_FAILING_TESTS = 20
 const EXCERPT_LINES_BEFORE = 12
 const EXCERPT_LINES_AFTER = 40
@@ -41,22 +44,27 @@ const ERROR_PATTERNS: readonly RegExp[] = [
  */
 const HARNESS_PATTERNS: readonly RegExp[] = [/^\s*(?:FAIL|not ok)\b/]
 
+// The lookbehind pins each try to the start of a path-shaped run. Without it
+// every character of a long run (a minified bundle in the log) was a fresh
+// start for the greedy class, which made a 100k-character line take seconds.
 const LOCATION_PATTERNS: readonly RegExp[] = [
   // tsc: src/app.ts(12,4): error TS2345
-  /([\w./-]+\.[A-Za-z]{1,6})\((\d+),\d+\)/,
+  /(?<![\w./-])([\w./-]+\.[A-Za-z]{1,6})\((\d+),\d+\)/,
   // node / jest / vitest: at src/app.ts:12:4, or src/app.ts:12
-  /([\w./-]+\.[A-Za-z]{1,6}):(\d+)(?::\d+)?/,
+  /(?<![\w./-])([\w./-]+\.[A-Za-z]{1,6}):(\d+)(?::\d+)?/,
 ]
 
+// Lines are already trimmed at the end, so the name runs to the end of the line.
 const TEST_PATTERNS: readonly RegExp[] = [
-  /^\s*not ok \d+\s*-\s*(.+?)\s*$/,
-  /^\s*FAIL\s+(.+?)\s*$/,
-  /^\s*\d+\)\s+(.+?)\s*$/,
+  /^\s*not ok \d+\s*-\s*(.+)$/,
+  /^\s*FAIL\s+(.+)$/,
+  /^\s*\d+\)\s+(.+)$/,
 ]
 
-/** Log chrome only. Never rewrites a value from the log body. */
+/** Log chrome only. Never rewrites a value from the log body, but cuts a dump line short. */
 function clean(line: string): string {
   return line
+    .slice(0, MAX_LINE_CHARS)
     .replace(ANSI, '')
     .replace(ACTIONS_TIMESTAMP, '')
     .replace(ACTIONS_COMMAND, '')
@@ -75,7 +83,8 @@ function findLocation(lines: readonly string[], from: number): string | null {
       const match = pattern.exec(line)
       const file = match?.[1]
       const lineNumber = match?.[2]
-      if (file && lineNumber && !file.startsWith('node_modules/')) {
+      // Runners print absolute paths, so the directory can sit anywhere in it.
+      if (file && lineNumber && !file.includes('node_modules/')) {
         return `${file}:${lineNumber}`
       }
     }
@@ -98,6 +107,50 @@ export function findLocations(text: string, max: number): { file: string; line: 
     if (found.size >= max) break
   }
   return [...found.values()]
+}
+
+/**
+ * The lines around `anchor`, grown a line at a time on each side until the
+ * character budget is spent. The anchor line is always kept (cut to the budget
+ * if it alone exceeds it) and no other line is cut mid-way, so `start` stays a
+ * true line index. A plain slice of the joined text lost the anchor line itself
+ * whenever its neighbours were long, which is the minified-stack-trace case.
+ */
+export function boundedWindow(
+  lines: readonly string[],
+  anchor: number,
+  limits: { before: number; after: number; maxChars: number },
+): { start: number; lines: string[] } {
+  const anchorLine = lines[anchor] ?? ''
+  if (anchorLine.length >= limits.maxChars) {
+    return { start: anchor, lines: [anchorLine.slice(0, limits.maxChars)] }
+  }
+
+  let start = anchor
+  let end = anchor + 1
+  let used = anchorLine.length
+  const lowest = Math.max(0, anchor - limits.before)
+  const highest = Math.min(lines.length, anchor + 1 + limits.after)
+
+  const fits = (line: string) => used + 1 + line.length <= limits.maxChars
+  let growing = true
+  while (growing) {
+    growing = false
+    const next = lines[end]
+    if (end < highest && next !== undefined && fits(next)) {
+      used += 1 + next.length
+      end += 1
+      growing = true
+    }
+    const previous = lines[start - 1]
+    if (start > lowest && previous !== undefined && fits(previous)) {
+      used += 1 + previous.length
+      start -= 1
+      growing = true
+    }
+  }
+
+  return { start, lines: lines.slice(start, end) }
 }
 
 function findFailingTests(lines: readonly string[]): string[] {
@@ -135,16 +188,23 @@ export function parseFailure(logs: string, options?: { maxExcerptChars?: number 
     found.length === 0 ? Math.max(0, lines.length - EXCERPT_LINES_AFTER) : Math.min(...found)
   const reportIndex = errorIndex === -1 ? harnessIndex : errorIndex
 
-  const window = lines
-    .slice(Math.max(0, anchor - EXCERPT_LINES_BEFORE), anchor + EXCERPT_LINES_AFTER)
-    .filter((line) => line.trim().length > 0)
+  const window = boundedWindow(lines, anchor, {
+    before: EXCERPT_LINES_BEFORE,
+    after: EXCERPT_LINES_AFTER,
+    maxChars: maxExcerptChars,
+  })
+    .lines.filter((line) => line.trim().length > 0)
     .join('\n')
 
+  // Goes into the prompt and the PR title as is, so a one-line dump is cut.
+  const firstError =
+    reportIndex === -1 ? null : lines[reportIndex]?.trim().slice(0, MAX_FIRST_ERROR_CHARS)
+
   return {
-    firstError: reportIndex === -1 ? null : (lines[reportIndex]?.trim() ?? null),
+    firstError: firstError || null,
     location: findLocation(lines, anchor),
     failingTests: findFailingTests(lines),
-    excerpt: window.length > maxExcerptChars ? window.slice(-maxExcerptChars) : window,
+    excerpt: window,
   }
 }
 

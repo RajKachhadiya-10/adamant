@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { compileHealGraph } from '../../server/agent/graph.ts'
-import { type GitProvider, type LlmProvider, type SandboxOutcome } from '../../server/agent/deps.ts'
+import {
+  type GitProvider,
+  type LlmProvider,
+  LlmTruncatedError,
+  type SandboxOutcome,
+} from '../../server/agent/deps.ts'
 import { createMemoryRecorder, type MemoryRecorder } from '../../server/agent/recorder.ts'
 
 /**
@@ -206,6 +211,74 @@ describe('autonomous heal loop', () => {
 
     assert.equal(finalState.status, 'failed')
     assert.equal(finalState.sandboxResult, null, 'attempt 1 verdict must not outlive attempt 2')
+  })
+
+  it('spends an attempt on a cut-off patch reply and tells the model why', async () => {
+    const log = journal()
+    const recorder = createMemoryRecorder()
+    const seen: Parameters<LlmProvider['patch']>[0][] = []
+    let patchCalls = 0
+    const llm: LlmProvider = {
+      ...scriptedLlm([]),
+      patch: async (input) => {
+        seen.push(input)
+        patchCalls += 1
+        if (patchCalls === 1) throw new LlmTruncatedError('max_output_tokens')
+        return 'good diff'
+      },
+    }
+    const graph = compileHealGraph({
+      git: fakeGit(log),
+      sandbox: sandboxScript([pass]),
+      llm,
+      recorder,
+    })
+
+    const finalState = await graph.invoke({ runId: 'run-79e', repository, baseSha: 'abc' })
+
+    assert.equal(finalState.status, 'completed')
+    assert.equal(finalState.attemptNumber, 2)
+    assert.deepEqual(
+      recorder.patches.map((row) => row.outcome),
+      ['generation_error', 'success'],
+    )
+    assert.match(String(recorder.patches[0]?.failureReason), /cut off .*max_output_tokens/)
+    assert.match(String(seen[1]?.previousAttempt?.failure), /cut off/)
+    assert.equal(seen[1]?.previousAttempt?.patch, '', 'no fragment is shown as a rejected diff')
+    assert.deepEqual(log.applied, ['good diff\n'], 'the fragment never reaches git apply')
+  })
+
+  it('does not run the sandbox again on a candidate identical to the rejected one', async () => {
+    const log = journal()
+    const recorder = createMemoryRecorder()
+    let sandboxRuns = 0
+    const seen: Parameters<LlmProvider['patch']>[0][] = []
+    const graph = compileHealGraph({
+      git: fakeGit(log),
+      sandbox: {
+        runValidation: async () => {
+          sandboxRuns += 1
+          return fail
+        },
+      },
+      llm: scriptedLlm(['same diff', 'same diff'], seen),
+      recorder,
+    })
+
+    const finalState = await graph.invoke({ runId: 'run-79d', repository, baseSha: 'abc' })
+
+    assert.equal(finalState.status, 'failed')
+    assert.equal(sandboxRuns, 1, 'the second, identical candidate is not validated again')
+    assert.equal(finalState.attemptNumber, 2, 'it still counts as a spent attempt')
+    assert.deepEqual(
+      recorder.patches.map((row) => [row.outcome, row.failureReason]),
+      [
+        ['failed_validation', 'sandbox fail'],
+        ['generation_error', 'identical to rejected candidate 1'],
+      ],
+    )
+    assert.match(String(seen[1]?.previousAttempt?.failure), /not ok 1 - sum adds two numbers/)
+    assert.equal(log.calls.includes('push'), false)
   })
 
   it('shows the model the source the failure points at', async () => {

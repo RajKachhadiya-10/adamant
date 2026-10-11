@@ -1,6 +1,6 @@
 import { type SourceExcerpt } from './deps.ts'
 import { redactText } from './recorder.ts'
-import { findLocations, type FailureContext } from './triage.ts'
+import { boundedWindow, findLocations, type FailureContext } from './triage.ts'
 
 /**
  * The code the failure points at. A unified diff only applies if its context
@@ -16,14 +16,20 @@ const MAX_EXCERPT_CHARS = 8_000
 type FileReader = (fromLog: string) => Promise<{ path: string; text: string } | null>
 
 function excerpt(path: string, text: string, line: number): SourceExcerpt {
+  // Redacted whole, before windowing, so a key block the window cuts through
+  // is still caught. Redaction keeps line counts, so the numbers stay true.
   // A final newline ends the last line; it does not start another one.
-  const lines = text.replace(/\n$/, '').split('\n')
-  const start = Math.max(1, line - LINES_BEFORE)
-  const end = Math.min(lines.length, line + LINES_AFTER)
-  let window = lines.slice(start - 1, end).join('\n')
-  if (window.length > MAX_EXCERPT_CHARS) window = window.slice(0, MAX_EXCERPT_CHARS)
+  const lines = redactText(text).replace(/\n$/, '').split('\n')
+  // A log can name a line past the end (compiled output, a stale trace); the
+  // tail of the file is still the closest thing to show.
+  const anchor = Math.min(Math.max(line, 1), lines.length) - 1
+  const window = boundedWindow(lines, anchor, {
+    before: LINES_BEFORE,
+    after: LINES_AFTER,
+    maxChars: MAX_EXCERPT_CHARS,
+  })
 
-  return { path, startLine: start, text: redactText(window) }
+  return { path, startLine: window.start + 1, text: window.lines.join('\n') }
 }
 
 /** Reads run concurrently; a file that cannot be found or read is skipped. */
