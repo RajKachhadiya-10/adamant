@@ -15,7 +15,13 @@ const { privateKey } = generateKeyPairSync('rsa', {
 
 const config = { appId: '12345', privateKey, apiBaseUrl: 'https://api.github.test' }
 
-type Recorded = { url: string; method: string; headers: Record<string, string>; body?: string }
+type Recorded = {
+  url: string
+  method: string
+  headers: Record<string, string>
+  body?: string
+  signal?: AbortSignal | null
+}
 
 function stubFetch(routes: Record<string, unknown>) {
   const calls: Recorded[] = []
@@ -26,6 +32,7 @@ function stubFetch(routes: Record<string, unknown>) {
       method,
       headers: (init?.headers ?? {}) as Record<string, string>,
       ...(typeof init?.body === 'string' ? { body: init.body } : {}),
+      ...(init?.signal === undefined ? {} : { signal: init.signal }),
     })
 
     // A route may be pinned to a method: `'PUT /pulls/7/merge'`.
@@ -227,6 +234,65 @@ describe('GitHub App client', () => {
       merge(client),
       /GitHub PUT \/repos\/acme\/eval\/pulls\/7\/merge failed: 404/,
     )
+  })
+
+  it('gives every call a timeout', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/access_tokens': { token: 'ghs_minted' },
+      '/actions/runs?head_sha': { workflow_runs: [] },
+    })
+    const client = createGitHubClient(config, fetchImpl)
+
+    await client.failedJobLogs({ installationId: '99', owner: 'acme', name: 'eval', headSha: 'a' })
+
+    assert.equal(calls.length, 2)
+    for (const call of calls) {
+      assert.ok(call.signal instanceof AbortSignal, call.url)
+    }
+  })
+
+  it('downloads logs a few at a time and keeps only their tail', async () => {
+    const jobs = Array.from({ length: 10 }, (_, i) => ({
+      id: 100 + i,
+      name: `shard-${i}`,
+      conclusion: 'failure',
+    }))
+    let inFlight = 0
+    let peak = 0
+    const fetchImpl: FetchLike = async (url, init) => {
+      if (url.endsWith('/access_tokens')) return Response.json({ token: 'ghs_minted' })
+      if (url.includes('/actions/runs?head_sha')) {
+        return Response.json({ workflow_runs: [{ id: 1, conclusion: 'failure' }] })
+      }
+      if (url.includes('/actions/runs/1/jobs')) return Response.json({ jobs })
+      if (url.includes('/logs')) {
+        inFlight += 1
+        peak = Math.max(peak, inFlight)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        inFlight -= 1
+        return new Response(`${'noise\n'.repeat(100_000)}the end ${url}`, {
+          headers: { 'content-type': 'text/plain' },
+        })
+      }
+      throw new Error(`unexpected ${init?.method ?? 'GET'} ${url}`)
+    }
+    const client = createGitHubClient(config, fetchImpl)
+
+    const logs = await client.failedJobLogs({
+      installationId: '99',
+      owner: 'acme',
+      name: 'eval',
+      headSha: 'deadbeef',
+    })
+
+    assert.ok(peak <= 4, `peak concurrency ${peak}`)
+    assert.ok(peak > 1, 'downloads still overlap')
+    const sections = logs.split('\n\n')
+    assert.equal(sections.length, 10)
+    assert.ok(sections.every((section) => section.length <= 200_000 + 40))
+    // Order follows the job list, and the end of every log survives.
+    assert.match(String(sections[0]), /^=== job: shard-0 ===/)
+    assert.match(String(sections[9]), /the end .*\/jobs\/109\/logs$/)
   })
 })
 
