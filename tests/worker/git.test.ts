@@ -331,6 +331,20 @@ describe('GitWorkspace against real git', () => {
     assert.deepEqual(files.stdout.trim().split('\n'), ['src/sum.ts'])
   })
 
+  it('survives a git child that exits before reading its stdin', async () => {
+    const dir = await tempDir()
+    // `--version` never reads stdin, so a pipe-buffer's worth of input is
+    // still unwritten when git exits and the write fails with EPIPE.
+    const result = await execGit(['--version'], {
+      cwd: dir,
+      env: { PATH: process.env.PATH ?? '' },
+      input: 'x'.repeat(4 * 1024 * 1024),
+    })
+
+    assert.equal(result.code, 0)
+    assert.match(result.stdout, /git version/)
+  })
+
   it('reads a file by the absolute path a CI runner printed', async () => {
     const { ws } = await repoWithBase()
 
