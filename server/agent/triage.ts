@@ -83,7 +83,8 @@ function findLocation(lines: readonly string[], from: number): string | null {
       const match = pattern.exec(line)
       const file = match?.[1]
       const lineNumber = match?.[2]
-      if (file && lineNumber && !file.startsWith('node_modules/')) {
+      // Runners print absolute paths, so the directory can sit anywhere in it.
+      if (file && lineNumber && !file.includes('node_modules/')) {
         return `${file}:${lineNumber}`
       }
     }

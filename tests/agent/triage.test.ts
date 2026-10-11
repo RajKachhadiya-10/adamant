@@ -43,6 +43,18 @@ describe('CI failure triage', () => {
     assert.equal(failure.location, 'src/app.ts:42')
   })
 
+  it('skips an absolute runner path inside node_modules too', () => {
+    const failure = parseFailure(
+      [
+        'Error: boom',
+        '    at /home/runner/work/eval/eval/node_modules/vitest/dist/index.js:100:2',
+        '    at /home/runner/work/eval/eval/src/app.ts:42:8',
+      ].join('\n'),
+    )
+
+    assert.equal(failure.location, '/home/runner/work/eval/eval/src/app.ts:42')
+  })
+
   it('reads a tsc diagnostic location', () => {
     const failure = parseFailure('src/app.ts(12,4): error TS2345: Argument of type string')
 
