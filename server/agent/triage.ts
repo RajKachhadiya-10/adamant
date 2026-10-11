@@ -111,23 +111,25 @@ export function findLocations(text: string, max: number): { file: string; line: 
 /**
  * The lines around `anchor`, grown a line at a time on each side until the
  * character budget is spent. The anchor line is always kept (cut to the budget
- * if it alone exceeds it) and no other line is cut mid-way. A plain slice of
- * the joined text lost the error line itself whenever the lines after it were
- * long, which is exactly the minified-stack-trace case.
+ * if it alone exceeds it) and no other line is cut mid-way, so `start` stays a
+ * true line index. A plain slice of the joined text lost the anchor line itself
+ * whenever its neighbours were long, which is the minified-stack-trace case.
  */
 export function boundedWindow(
   lines: readonly string[],
   anchor: number,
   limits: { before: number; after: number; maxChars: number },
-): string[] {
+): { start: number; lines: string[] } {
   const anchorLine = lines[anchor] ?? ''
-  if (anchorLine.length >= limits.maxChars) return [anchorLine.slice(0, limits.maxChars)]
+  if (anchorLine.length >= limits.maxChars) {
+    return { start: anchor, lines: [anchorLine.slice(0, limits.maxChars)] }
+  }
 
   let start = anchor
   let end = anchor + 1
   let used = anchorLine.length
   const lowest = Math.max(0, anchor - limits.before)
-  const highest = Math.min(lines.length, anchor + limits.after)
+  const highest = Math.min(lines.length, anchor + 1 + limits.after)
 
   const fits = (line: string) => used + 1 + line.length <= limits.maxChars
   let growing = true
@@ -147,7 +149,7 @@ export function boundedWindow(
     }
   }
 
-  return lines.slice(start, end)
+  return { start, lines: lines.slice(start, end) }
 }
 
 function findFailingTests(lines: readonly string[]): string[] {
@@ -190,7 +192,7 @@ export function parseFailure(logs: string, options?: { maxExcerptChars?: number 
     after: EXCERPT_LINES_AFTER,
     maxChars: maxExcerptChars,
   })
-    .filter((line) => line.trim().length > 0)
+    .lines.filter((line) => line.trim().length > 0)
     .join('\n')
 
   // Goes into the prompt and the PR title as is, so a one-line dump is cut.
