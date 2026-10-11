@@ -53,9 +53,10 @@ export function guardNavigation(
 
   // `will-navigate` only covers the main frame. The CSP already pins frames
   // to 'self' and the renderer has none, so nothing legitimate is lost by
-  // refusing every subframe navigation outright.
+  // refusing every subframe navigation outright. DevTools is Chromium's own
+  // document (also seen by `web-contents-created`) and is left alone.
   contents.on('will-frame-navigate', (details) => {
-    if (details.isMainFrame) return
+    if (details.isMainFrame || contents.getURL().startsWith('devtools://')) return
     details.preventDefault()
   })
 

@@ -105,6 +105,15 @@ describe('navigation guard', () => {
     assert.deepEqual(opened, [])
   })
 
+  it('leaves the DevTools document, which frames its own panels, alone', () => {
+    const { contents, willFrameNavigate } = fakeContents(
+      'devtools://devtools/bundled/devtools_app.html?remoteBase=x',
+    )
+    guardNavigation(contents, async () => {})
+
+    assert.equal(willFrameNavigate('devtools://devtools/bundled/panel.html', false), false)
+  })
+
   it('reports a browser that refuses the URL instead of leaving a rejection unhandled', async () => {
     const error = mock.method(console, 'error', () => {})
     const rejections: unknown[] = []
