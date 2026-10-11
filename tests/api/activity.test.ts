@@ -488,6 +488,50 @@ describe('Activity from the database', () => {
     )
   })
 
+  it('remembers only a window of sent ids per connection', async () => {
+    const service = createActivityService()
+    const app = createActivityRoute(service, { dedupeWindow: 2 })
+    const controller = new AbortController()
+    const publish = (id: string) =>
+      service.publish({ id, type: 'audit:step', timestamp: new Date().toISOString(), payload: {} })
+
+    try {
+      const res = await app.request('/', { signal: controller.signal })
+      assert.ok(res.body)
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let text = ''
+      // Reads up to a sentinel so a dropped event fails the count, not the read.
+      const readUntil = async (sentinel: string) => {
+        while (!text.includes(`id: ${sentinel}\n`)) {
+          const { done, value } = await reader.read()
+          if (done || !value) break
+          text += decoder.decode(value, { stream: true })
+        }
+      }
+
+      // A repeat inside the window is dropped, so the connection sees it once.
+      publish('dup')
+      publish('dup')
+      publish('other-1')
+      await readUntil('other-1')
+      assert.equal((text.match(/^id: dup$/gm) ?? []).length, 1)
+
+      // Once enough newer ids have gone out, the old id is forgotten rather
+      // than held for the life of the connection.
+      publish('other-2')
+      publish('dup')
+      publish('other-3')
+      await readUntil('other-3')
+      assert.equal((text.match(/^id: dup$/gm) ?? []).length, 2)
+      reader.releaseLock()
+    } finally {
+      controller.abort()
+      await waitTick()
+      assert.equal(service.subscriberCount(), 0)
+    }
+  })
+
   it('keeps an idle stream open with heartbeat comments', async () => {
     const app = createActivityRoute(createActivityService(), { heartbeatMs: 5 })
     const controller = new AbortController()

@@ -45,6 +45,11 @@ export function createGithubWebhookRoute(service?: WebhookService) {
     if (!deliveryId) {
       return c.json({ error: 'Missing delivery ID' }, 400)
     }
+    // GitHub always names the event. Without it the delivery would be stored
+    // with an empty `event_type` and shown to `adamant watch` as `webhook:`.
+    if (!event) {
+      return c.json({ error: 'Missing event name' }, 400)
+    }
 
     // We need the raw text to verify the HMAC signature
     const rawBody = await c.req.text()

@@ -76,6 +76,81 @@ describe('CLI run routes', () => {
     assert.equal(created, 0)
   })
 
+  it('rejects fields that are not strings, even when they coerce to a valid SHA', async () => {
+    let created = 0
+    const store = {
+      create: async () => {
+        created += 1
+        return { run, created: true }
+      },
+      list: async () => [],
+      detail: async () => null,
+    } satisfies RunApiStore
+    process.env.ADAMANT_SESSION_SECRET = session
+    process.env.ADAMANT_SEED_USER_ID = userId
+    const route = createRunsRoute(store)
+    const headers = {
+      ADAMANT_SESSION: session,
+      'content-type': 'application/json',
+      'idempotency-key': 'key',
+    }
+
+    const bodies = [
+      { repositoryId: 'repo-1', sourceSha: ['a'.repeat(40)] },
+      { repositoryId: ['repo-1'], sourceSha: 'a'.repeat(40) },
+      { repositoryId: { id: 'repo-1' }, sourceSha: 'a'.repeat(40) },
+      { repositoryId: 'repo-1', sourceSha: 1 },
+    ]
+    for (const body of bodies) {
+      const response = await route.request('/', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      })
+      assert.equal(response.status, 400, JSON.stringify(body))
+    }
+    assert.equal(created, 0)
+  })
+
+  it('bounds the idempotency key and the request body', async () => {
+    let created = 0
+    const store = {
+      create: async () => {
+        created += 1
+        return { run, created: true }
+      },
+      list: async () => [],
+      detail: async () => null,
+    } satisfies RunApiStore
+    process.env.ADAMANT_SESSION_SECRET = session
+    process.env.ADAMANT_SEED_USER_ID = userId
+    const route = createRunsRoute(store)
+    const valid = { repositoryId: 'repo-1', sourceSha: 'a'.repeat(40) }
+
+    const longKey = await route.request('/', {
+      method: 'POST',
+      headers: {
+        ADAMANT_SESSION: session,
+        'content-type': 'application/json',
+        'idempotency-key': 'k'.repeat(256),
+      },
+      body: JSON.stringify(valid),
+    })
+    assert.equal(longKey.status, 400)
+
+    const oversized = await route.request('/', {
+      method: 'POST',
+      headers: {
+        ADAMANT_SESSION: session,
+        'content-type': 'application/json',
+        'idempotency-key': 'key',
+      },
+      body: JSON.stringify({ ...valid, padding: 'x'.repeat(64 * 1024) }),
+    })
+    assert.equal(oversized.status, 413)
+    assert.equal(created, 0)
+  })
+
   it('answers 404, not 500, for a repository that does not exist', async () => {
     const store = {
       create: async () => {

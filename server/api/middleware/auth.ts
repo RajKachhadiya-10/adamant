@@ -40,11 +40,13 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
     (database ? (token: string) => authenticateSession(database, token) : undefined)
 
   return async function authMiddleware(c: Context, next: Next) {
+    // Never the query string: a URL is written to every access log, proxy and
+    // browser history between the client and this process. Every caller can
+    // set a header or carries the cookie.
     const token =
       c.req.header('ADAMANT_SESSION') ??
       readBearerToken(c.req.header('Authorization')) ??
-      getCookie(c, SESSION_COOKIE_NAME) ??
-      c.req.query('session')
+      getCookie(c, SESSION_COOKIE_NAME)
 
     if (!token) {
       return c.json({ error: 'Unauthorized' }, 401)

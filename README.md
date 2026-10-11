@@ -157,8 +157,8 @@ needs `pnpm --filter @adamant/server dev` with them in the environment.
 | `GET /runs`, `GET /runs/:id`         | session               | List runs; one run with its audit trail           |
 | `GET /activity`                      | session               | Feed for `adamant watch` (stub)                   |
 
-A session arrives as the `adamant_session` cookie, an `Authorization: Bearer` header, an
-`ADAMANT_SESSION` header, or a `session` query parameter for the SSE feed. `/auth/*` and the
+A session arrives as the `adamant_session` cookie, an `Authorization: Bearer` header, or an
+`ADAMANT_SESSION` header, never in the URL (query strings end up in access logs). `/auth/*` and the
 Postgres-backed runs router mount only when `DATABASE_URL` is set; without it the API falls back
 to the seeded session and an in-memory store. The remaining schema tables are also exposed as
 CRUD routes behind the same auth, for development.

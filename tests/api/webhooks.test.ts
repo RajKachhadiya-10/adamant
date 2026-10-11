@@ -68,14 +68,22 @@ describe('GitHub webhook', () => {
     assert.deepEqual(await response.json(), { error: 'Server configuration error' })
   })
 
-  it('rejects a missing delivery id and a bad signature', async () => {
+  it('rejects a missing delivery id, a missing event name, and a bad signature', async () => {
     await withSecret(async () => {
-      const route = createGithubWebhookRoute(service().webhooks)
+      const { store, webhooks } = service()
+      const route = createGithubWebhookRoute(webhooks)
       const missing = await post(route, '{}', {
         'x-github-event': 'ping',
         'x-hub-signature-256': sign('{}'),
       })
       assert.equal(missing.status, 400)
+
+      const unnamed = await post(route, '{}', {
+        'x-github-delivery': 'delivery-no-event',
+        'x-hub-signature-256': sign('{}'),
+      })
+      assert.equal(unnamed.status, 400)
+      assert.equal(store.deliveries.size, 0)
 
       const body = JSON.stringify({ zen: 'keep it logically awesome' })
       const bad = await post(route, body, {

@@ -100,10 +100,35 @@ describe('session authentication', () => {
       }),
     )
 
-    assert.equal((await app.request('/?session=wrong')).status, 401)
-    const response = await app.request('/?session=seed-token')
+    assert.equal((await app.request('/', { headers: { ADAMANT_SESSION: 'wrong' } })).status, 401)
+    const response = await app.request('/', { headers: { ADAMANT_SESSION: 'seed-token' } })
     assert.equal(response.status, 200)
     assert.equal(authenticatedUserId, 'seed-user')
+  })
+
+  it('ignores a session token in the query string', async () => {
+    let authenticateCalls = 0
+    const store = {
+      create: async () => {
+        throw new Error('not used')
+      },
+      list: async () => [],
+      detail: async () => null,
+    } satisfies RunApiStore
+    const app = createRunsRoute(
+      store,
+      createAuthMiddleware({
+        authenticate: async () => {
+          authenticateCalls += 1
+          return { sessionId: 'session-1', userId: 'user-1' }
+        },
+      }),
+    )
+
+    const response = await app.request('/?session=valid')
+
+    assert.equal(response.status, 401)
+    assert.equal(authenticateCalls, 0)
   })
 })
 
