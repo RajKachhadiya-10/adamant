@@ -22,6 +22,35 @@ describe('normalizePatch', () => {
   it('drops a sentence before an unfenced diff', () => {
     assert.equal(normalizePatch(`The fix:\n${diff}`), diff)
   })
+
+  it('picks the fenced block that holds the diff, not the first fence', () => {
+    const reply = `The bug:\n\n\`\`\`ts\nreturn a - b\n\`\`\`\n\nThe fix:\n\n\`\`\`diff\n${diff}\`\`\`\n`
+    assert.equal(normalizePatch(reply), diff)
+  })
+
+  it('joins one fenced diff per file into a single patch', () => {
+    const second = '--- a/src/mul.ts\n+++ b/src/mul.ts\n@@ -1 +1 @@\n-c\n+d\n'
+    const reply = `\`\`\`diff\n${diff}\`\`\`\n\nAnd:\n\n\`\`\`diff\n${second}\`\`\`\n`
+    assert.equal(normalizePatch(reply), diff + second)
+  })
+
+  it('does not end the fence at a fence line inside a diff of a Markdown file', () => {
+    const readme = [
+      '--- a/README.md',
+      '+++ b/README.md',
+      '@@ -1 +1,4 @@',
+      ' # Title',
+      '+```sh',
+      '+pnpm test',
+      '+```',
+      '',
+    ].join('\n')
+    assert.equal(normalizePatch(`\`\`\`diff\n${readme}\`\`\``), readme)
+  })
+
+  it('normalizes CRLF line endings, which apply rejects against an LF file', () => {
+    assert.equal(normalizePatch(diff.replace(/\n/g, '\r\n')), diff)
+  })
 })
 
 describe('findLocations', () => {
