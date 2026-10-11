@@ -103,6 +103,60 @@ describe('DockerSandbox', () => {
     assert.deepEqual(capturedArgs.slice(-3), ['sh', '-c', 'pnpm test'])
   })
 
+  it('labels every container with its run so leftovers can be found later', async () => {
+    let capturedArgs: string[] = []
+    const mockSpawn: SpawnFunction = (_cmd, args) => {
+      capturedArgs = args
+      return closeSoon(createMockProcess())
+    }
+
+    const sandbox = new DockerSandbox({ spawnFn: mockSpawn })
+    await sandbox.run({ workspacePath: process.cwd(), command: 'true', runId: 'eval-42' })
+
+    const label = capturedArgs.indexOf('--label')
+    assert.notStrictEqual(label, -1)
+    assert.strictEqual(capturedArgs[label + 1], 'adamant.run=eval-42')
+  })
+
+  it('force-removes the containers still running for a run', async () => {
+    const calls: string[][] = []
+    const mockSpawn: SpawnFunction = (_cmd, args) => {
+      calls.push(args)
+      const proc = createMockProcess()
+      process.nextTick(() => {
+        if (args[0] === 'ps') proc.stdout.emit('data', 'abc123\ndef456\n')
+        proc.emit('close', 0)
+      })
+      return proc as unknown as ChildProcess
+    }
+
+    const sandbox = new DockerSandbox({ spawnFn: mockSpawn })
+    await sandbox.removeRunContainers('eval-42')
+
+    assert.deepEqual(calls, [
+      ['ps', '-aq', '--filter', 'label=adamant.run=eval-42'],
+      ['rm', '-f', 'abc123', 'def456'],
+    ])
+  })
+
+  it('removes nothing when a run has no containers or the daemon is gone', async () => {
+    const calls: string[][] = []
+    const mockSpawn: SpawnFunction = (_cmd, args) => {
+      calls.push(args)
+      const proc = createMockProcess()
+      process.nextTick(() => proc.emit('error', new Error('ENOENT')))
+      return proc as unknown as ChildProcess
+    }
+
+    const sandbox = new DockerSandbox({ spawnFn: mockSpawn })
+    await sandbox.removeRunContainers('eval-42')
+
+    assert.deepEqual(
+      calls.map((args) => args[0]),
+      ['ps'],
+    )
+  })
+
   it('handles infra failure distinctly from test failure', async () => {
     const mockSpawn: SpawnFunction = () => {
       const proc = createMockProcess()
@@ -245,6 +299,34 @@ describe('DockerSandbox', () => {
     assert.doesNotMatch(envFile, /DB_PASSWORD/)
     assert.doesNotMatch(envFile, /AUTH_COOKIE/)
     assert.doesNotMatch(envFile, /secretpassword/)
+  })
+
+  it('shadows the repository with a read-only mount so the container cannot rewrite it', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'adamant-sb-git-'))
+    fs.mkdirSync(path.join(workspace, '.git'))
+    let capturedArgs: string[] = []
+    const mockSpawn: SpawnFunction = (_cmd, args) => {
+      capturedArgs = args
+      return closeSoon(createMockProcess())
+    }
+
+    try {
+      const sandbox = new DockerSandbox({ spawnFn: mockSpawn })
+      await sandbox.run({ workspacePath: workspace, workdir: 'packages/app', command: 'true' })
+
+      const mounts = capturedArgs.filter((_arg, i) => capturedArgs[i - 1] === '--mount')
+      assert.deepEqual(mounts, [
+        `type=bind,src=${workspace},dst=/workspace`,
+        `type=bind,src=${path.join(workspace, '.git')},dst=/workspace/.git,readonly`,
+      ])
+
+      // A workspace without a repository (a bare directory of files) gets no overlay.
+      fs.rmSync(path.join(workspace, '.git'), { recursive: true })
+      await sandbox.run({ workspacePath: workspace, command: 'true' })
+      assert.equal(capturedArgs.filter((arg) => arg.includes('.git')).length, 0)
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true })
+    }
   })
 
   it('sets custom workdir inside workspace and blocks path traversal', async () => {

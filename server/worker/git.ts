@@ -147,7 +147,11 @@ export const execGit: ExecGit = (args, options) =>
 
     let stdout = ''
     let stderr = ''
-    const timer = setTimeout(() => child.kill('SIGKILL'), DEFAULT_TIMEOUT_MS)
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill('SIGKILL')
+    }, DEFAULT_TIMEOUT_MS)
 
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
@@ -163,8 +167,17 @@ export const execGit: ExecGit = (args, options) =>
     })
     child.on('close', (code) => {
       clearTimeout(timer)
+      if (timedOut) {
+        stderr = truncate(`${stderr}\ngit ${args[0]} timed out after ${DEFAULT_TIMEOUT_MS}ms`)
+      }
       resolve({ code: code ?? -1, stdout, stderr })
     })
+
+    // A child that exits before draining its stdin (not a repository, patch
+    // refused early) fails the pending write with EPIPE. Unhandled, that is an
+    // uncaught exception that takes the worker down with every heal in
+    // flight; the exit code already says what went wrong.
+    child.stdin.on('error', () => {})
 
     if (options.input !== undefined) {
       child.stdin.end(options.input)
@@ -333,6 +346,12 @@ export class GitWorkspace {
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_ADVICE: '0',
+      // Hooks run on this host, outside the sandbox, with the askpass token
+      // in reach. The worktree is shared with the container, so nothing that
+      // ends up under `.git/hooks` or in `core.hooksPath` may execute here.
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'core.hooksPath',
+      GIT_CONFIG_VALUE_0: '/dev/null',
     }
 
     if (options?.authenticated) {

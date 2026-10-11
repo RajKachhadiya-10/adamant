@@ -53,7 +53,7 @@ export interface RunProviders {
   readonly git: GitProvider
   readonly sandbox: SandboxProvider
   readonly recorder: RunRecorder
-  /** Removes the run's worktree and its askpass helper. Always call it. */
+  /** Removes the run's containers, worktree and askpass helper. Always call it. */
   readonly dispose: () => Promise<void>
 }
 
@@ -103,6 +103,14 @@ export function createRunProviders(options: RunProviderOptions): RunProviders {
   })
 
   const settings = options.sandboxSettings ?? readSandboxSettings()
+  const sandbox = createDockerSandboxProvider({
+    runId: run.runId,
+    workspacePath,
+    image: settings.image,
+    installCommand: settings.installCommand,
+    testCommand: settings.testCommand,
+    ...(settings.workdir ? { workdir: settings.workdir } : {}),
+  })
 
   return {
     git: createGitHubGitProvider(
@@ -116,15 +124,12 @@ export function createRunProviders(options: RunProviderOptions): RunProviders {
       workspace,
       github,
     ),
-    sandbox: createDockerSandboxProvider({
-      runId: run.runId,
-      workspacePath,
-      image: settings.image,
-      installCommand: settings.installCommand,
-      testCommand: settings.testCommand,
-      ...(settings.workdir ? { workdir: settings.workdir } : {}),
-    }),
+    sandbox,
     recorder,
-    dispose: () => workspace.cleanup(),
+    // Containers first: one still running holds the worktree open.
+    dispose: async () => {
+      await sandbox.dispose()
+      await workspace.cleanup()
+    },
   }
 }

@@ -132,6 +132,37 @@ describe('sandbox provider', () => {
     assert.ok(outcome.output.length <= 16_000)
   })
 
+  it('removes the container a dead worker left for this run before starting its own', async () => {
+    const events: string[] = []
+    const sandbox = {
+      run: async (options: SandboxExecutionOptions) => {
+        events.push(`run ${options.command}`)
+        return ok
+      },
+      removeRunContainers: async (runId: string) => void events.push(`remove ${runId}`),
+    }
+    const provider = createDockerSandboxProvider({
+      runId: 'run-1',
+      workspacePath: '/tmp/adamant/run-1',
+      installCommand: 'npm ci',
+      testCommand: 'npm test',
+      sandbox,
+    })
+
+    await provider.runValidation({ attemptNumber: 1, candidateHash: 'a' })
+    await provider.runValidation({ attemptNumber: 2, candidateHash: 'b' })
+    await provider.dispose()
+
+    assert.deepEqual(events, [
+      'remove run-1',
+      'run npm ci',
+      'run npm test',
+      'run npm ci',
+      'run npm test',
+      'remove run-1',
+    ])
+  })
+
   it('passes workdir option through to docker sandbox run calls', async () => {
     const { seen, provider: sandbox } = provider([ok, ok], { workdir: 'packages/backend' })
 

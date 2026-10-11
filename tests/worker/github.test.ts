@@ -15,7 +15,13 @@ const { privateKey } = generateKeyPairSync('rsa', {
 
 const config = { appId: '12345', privateKey, apiBaseUrl: 'https://api.github.test' }
 
-type Recorded = { url: string; method: string; headers: Record<string, string>; body?: string }
+type Recorded = {
+  url: string
+  method: string
+  headers: Record<string, string>
+  body?: string
+  signal?: AbortSignal | null
+}
 
 function stubFetch(routes: Record<string, unknown>) {
   const calls: Recorded[] = []
@@ -26,9 +32,15 @@ function stubFetch(routes: Record<string, unknown>) {
       method,
       headers: (init?.headers ?? {}) as Record<string, string>,
       ...(typeof init?.body === 'string' ? { body: init.body } : {}),
+      ...(init?.signal === undefined ? {} : { signal: init.signal }),
     })
 
-    const key = Object.keys(routes).find((route) => url.endsWith(route) || url.includes(route))
+    // A route may be pinned to a method: `'PUT /pulls/7/merge'`.
+    const key = Object.keys(routes).find((route) => {
+      const [routeMethod, routePath] = route.includes(' ') ? route.split(' ') : [null, route]
+      if (routeMethod && routeMethod !== method) return false
+      return url.endsWith(String(routePath)) || url.includes(String(routePath))
+    })
     const payload = key ? routes[key] : undefined
 
     if (payload === undefined) {
@@ -152,41 +164,135 @@ describe('GitHub App client', () => {
     assert.equal(logs, '')
   })
 
-  it('squash merges the pull request it is given', async () => {
-    const { calls, fetchImpl } = stubFetch({
-      '/access_tokens': { token: 'ghs_minted' },
-      '/pulls/7/merge': { merged: true },
-    })
-    const client = createGitHubClient(config, fetchImpl)
+  const ourPr = (overrides: Record<string, unknown> = {}) => ({
+    state: 'open',
+    merged: false,
+    head: { ref: 'adamant/run-1', repo: { full_name: 'acme/eval' } },
+    ...overrides,
+  })
 
-    await client.mergePullRequest({
+  const merge = (client: ReturnType<typeof createGitHubClient>) =>
+    client.mergePullRequest({
       installationId: '99',
       owner: 'acme',
       name: 'eval',
       prNumber: 7,
+      headRef: 'adamant/run-1',
       commitTitle: 'Adamant run run-1 (#7)',
     })
 
-    const merge = calls.at(-1)
-    assert.equal(merge?.method, 'PUT')
-    assert.equal(merge?.url, 'https://api.github.test/repos/acme/eval/pulls/7/merge')
-    assert.equal(JSON.parse(String(merge?.body)).merge_method, 'squash')
+  it('squash merges the pull request it is given once its head checks out', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/access_tokens': { token: 'ghs_minted' },
+      'PUT /pulls/7/merge': { merged: true },
+      'GET /pulls/7': ourPr(),
+    })
+    const client = createGitHubClient(config, fetchImpl)
+
+    await merge(client)
+
+    const last = calls.at(-1)
+    assert.equal(last?.method, 'PUT')
+    assert.equal(last?.url, 'https://api.github.test/repos/acme/eval/pulls/7/merge')
+    assert.equal(JSON.parse(String(last?.body)).merge_method, 'squash')
+    assert.equal(calls.at(-2)?.url, 'https://api.github.test/repos/acme/eval/pulls/7')
+  })
+
+  it('refuses to merge a pull request whose head is not this run on this repo', async () => {
+    const heads = [
+      ourPr({ head: { ref: 'feature/x', repo: { full_name: 'acme/eval' } } }),
+      ourPr({ head: { ref: 'adamant/run-1', repo: { full_name: 'mallory/eval' } } }),
+      ourPr({ head: { ref: 'adamant/run-1', repo: null } }),
+      ourPr({ state: 'closed' }),
+      ourPr({ merged: true }),
+    ]
+
+    for (const pr of heads) {
+      const { calls, fetchImpl } = stubFetch({
+        '/access_tokens': { token: 'ghs_minted' },
+        'PUT /pulls/7/merge': { merged: true },
+        'GET /pulls/7': pr,
+      })
+
+      await assert.rejects(merge(createGitHubClient(config, fetchImpl)), /Refusing to merge PR #7/)
+      assert.equal(
+        calls.some((call) => call.method === 'PUT'),
+        false,
+        JSON.stringify(pr),
+      )
+    }
   })
 
   it('reports a failed call by status without echoing the response body', async () => {
-    const { fetchImpl } = stubFetch({ '/access_tokens': { token: 'ghs_minted' } })
+    const { fetchImpl } = stubFetch({
+      '/access_tokens': { token: 'ghs_minted' },
+      'GET /pulls/7': ourPr(),
+    })
     const client = createGitHubClient(config, fetchImpl)
 
     await assert.rejects(
-      client.mergePullRequest({
-        installationId: '99',
-        owner: 'acme',
-        name: 'eval',
-        prNumber: 7,
-        commitTitle: 'title',
-      }),
+      merge(client),
       /GitHub PUT \/repos\/acme\/eval\/pulls\/7\/merge failed: 404/,
     )
+  })
+
+  it('gives every call a timeout', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/access_tokens': { token: 'ghs_minted' },
+      '/actions/runs?head_sha': { workflow_runs: [] },
+    })
+    const client = createGitHubClient(config, fetchImpl)
+
+    await client.failedJobLogs({ installationId: '99', owner: 'acme', name: 'eval', headSha: 'a' })
+
+    assert.equal(calls.length, 2)
+    for (const call of calls) {
+      assert.ok(call.signal instanceof AbortSignal, call.url)
+    }
+  })
+
+  it('downloads logs a few at a time and keeps only their tail', async () => {
+    const jobs = Array.from({ length: 10 }, (_, i) => ({
+      id: 100 + i,
+      name: `shard-${i}`,
+      conclusion: 'failure',
+    }))
+    let inFlight = 0
+    let peak = 0
+    const fetchImpl: FetchLike = async (url, init) => {
+      if (url.endsWith('/access_tokens')) return Response.json({ token: 'ghs_minted' })
+      if (url.includes('/actions/runs?head_sha')) {
+        return Response.json({ workflow_runs: [{ id: 1, conclusion: 'failure' }] })
+      }
+      if (url.includes('/actions/runs/1/jobs')) return Response.json({ jobs })
+      if (url.includes('/logs')) {
+        inFlight += 1
+        peak = Math.max(peak, inFlight)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        inFlight -= 1
+        return new Response(`${'noise\n'.repeat(100_000)}the end ${url}`, {
+          headers: { 'content-type': 'text/plain' },
+        })
+      }
+      throw new Error(`unexpected ${init?.method ?? 'GET'} ${url}`)
+    }
+    const client = createGitHubClient(config, fetchImpl)
+
+    const logs = await client.failedJobLogs({
+      installationId: '99',
+      owner: 'acme',
+      name: 'eval',
+      headSha: 'deadbeef',
+    })
+
+    assert.ok(peak <= 4, `peak concurrency ${peak}`)
+    assert.ok(peak > 1, 'downloads still overlap')
+    const sections = logs.split('\n\n')
+    assert.equal(sections.length, 10)
+    assert.ok(sections.every((section) => section.length <= 200_000 + 40))
+    // Order follows the job list, and the end of every log survives.
+    assert.match(String(sections[0]), /^=== job: shard-0 ===/)
+    assert.match(String(sections[9]), /the end .*\/jobs\/109\/logs$/)
   })
 })
 

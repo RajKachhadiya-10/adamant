@@ -18,6 +18,15 @@ const DEFAULT_API = 'https://api.github.com'
 const JWT_LIFETIME_SECONDS = 540
 const MAX_JOB_LOG_CHARS = 200_000
 const USER_AGENT = 'adamant-heal-agent'
+/**
+ * A hung connection would otherwise hold the heal, and its job slot, until
+ * graphile-worker's lock expires hours later. Log downloads get longer: they
+ * are large and served from blob storage.
+ */
+const API_TIMEOUT_MS = 30_000
+const LOG_TIMEOUT_MS = 120_000
+/** Failed jobs in a matrix can run to dozens; this bounds sockets and memory. */
+const LOG_DOWNLOAD_CONCURRENCY = 4
 
 function base64url(input: Buffer | string): string {
   return Buffer.from(input).toString('base64url')
@@ -32,6 +41,45 @@ function appJwt(config: GitHubAppConfig, now = Math.floor(Date.now() / 1000)): s
   const signature = createSign('RSA-SHA256').update(`${header}.${payload}`).sign(config.privateKey)
 
   return `${header}.${payload}.${base64url(signature)}`
+}
+
+/** `fn` over `items` with at most `limit` in flight. Results keep the input order. */
+async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array<R>(items.length)
+  const queue = items.map((item, index) => ({ item, index }))
+  const lane = async () => {
+    for (let next = queue.shift(); next; next = queue.shift()) {
+      results[next.index] = await fn(next.item)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane))
+  return results
+}
+
+/**
+ * The last `maxChars` of a response body, read as a stream. A job log can be
+ * hundreds of megabytes; only its tail is wanted, so the whole thing is never
+ * held in memory.
+ */
+async function readTail(response: Response, maxChars: number): Promise<string> {
+  const body = response.body
+  if (!body) return (await response.text()).slice(-maxChars)
+
+  const decoder = new TextDecoder()
+  const reader = body.getReader()
+  let tail = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    tail += decoder.decode(value, { stream: true })
+    if (tail.length > maxChars * 2) tail = tail.slice(-maxChars)
+  }
+  tail += decoder.decode()
+  return tail.slice(-maxChars)
 }
 
 export interface WorkflowJob {
@@ -57,13 +105,25 @@ export interface GitHubClient {
     title: string
     body: string
   }): Promise<{ number: number; url: string }>
+  /**
+   * Merges `prNumber` only if its head is `headRef` on this repository and
+   * it is still open. The number alone is not proof it is this run's PR.
+   */
   mergePullRequest(input: {
     installationId: string
     owner: string
     name: string
     prNumber: number
+    headRef: string
     commitTitle: string
   }): Promise<void>
+}
+
+/** Read back before a merge. Anything else on the PR is ignored. */
+interface PullRequestHead {
+  readonly state: string
+  readonly merged: boolean
+  readonly head: { readonly ref: string; readonly repo: { readonly full_name: string } | null }
 }
 
 export class GitHubApiError extends Error {
@@ -86,6 +146,7 @@ export function createGitHubClient(config: GitHubAppConfig, fetchImpl?: FetchLik
     path: string,
     body?: unknown,
     accept = 'application/vnd.github+json',
+    timeoutMs = API_TIMEOUT_MS,
   ): Promise<Response> {
     const response = await doFetch(`${api}${path}`, {
       method,
@@ -97,6 +158,7 @@ export function createGitHubClient(config: GitHubAppConfig, fetchImpl?: FetchLik
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(timeoutMs),
     })
 
     if (!response.ok) {
@@ -125,6 +187,7 @@ export function createGitHubClient(config: GitHubAppConfig, fetchImpl?: FetchLik
           'user-agent': USER_AGENT,
           'x-github-api-version': '2022-11-28',
         },
+        signal: AbortSignal.timeout(API_TIMEOUT_MS),
       })
 
       if (!response.ok) {
@@ -173,19 +236,17 @@ export function createGitHubClient(config: GitHubAppConfig, fetchImpl?: FetchLik
         (list.jobs ?? []).filter((job) => job.conclusion === 'failure'),
       )
 
-      const sections = await Promise.all(
-        failedJobs.map(async (job) => {
-          const logs = await call(
-            token,
-            'GET',
-            `/repos/${repo}/actions/jobs/${job.id}/logs`,
-            undefined,
-            'text/plain',
-          )
-          const text = await logs.text()
-          return `=== job: ${job.name} ===\n${text.slice(-MAX_JOB_LOG_CHARS)}`
-        }),
-      )
+      const sections = await mapLimit(failedJobs, LOG_DOWNLOAD_CONCURRENCY, async (job) => {
+        const logs = await call(
+          token,
+          'GET',
+          `/repos/${repo}/actions/jobs/${job.id}/logs`,
+          undefined,
+          'text/plain',
+          LOG_TIMEOUT_MS,
+        )
+        return `=== job: ${job.name} ===\n${await readTail(logs, MAX_JOB_LOG_CHARS)}`
+      })
 
       return sections.join('\n\n')
     },
@@ -203,9 +264,26 @@ export function createGitHubClient(config: GitHubAppConfig, fetchImpl?: FetchLik
       return { number: pr.number, url: pr.html_url }
     },
 
-    async mergePullRequest({ installationId, owner, name, prNumber, commitTitle }) {
+    async mergePullRequest({ installationId, owner, name, prNumber, headRef, commitTitle }) {
       const token = await client.installationToken(installationId)
       const repo = `${encodeURIComponent(owner)}/${encodeURIComponent(name)}`
+
+      // The run's own PR has this head on this repo. A PR number is a small
+      // integer that could name anyone's PR, so the head is read back and
+      // checked here before the merge goes out, not taken on trust.
+      const pr = await json<PullRequestHead>(token, 'GET', `/repos/${repo}/pulls/${prNumber}`)
+      const headRepo = pr.head.repo?.full_name.toLowerCase() ?? null
+      if (pr.head.ref !== headRef || headRepo !== `${owner}/${name}`.toLowerCase()) {
+        throw new Error(
+          `Refusing to merge PR #${prNumber}: its head is ${headRepo ?? '(deleted)'}:${pr.head.ref}, not ${owner}/${name}:${headRef}.`,
+        )
+      }
+      if (pr.state !== 'open' || pr.merged) {
+        throw new Error(
+          `Refusing to merge PR #${prNumber}: it is ${pr.merged ? 'merged' : pr.state}.`,
+        )
+      }
+
       await json(token, 'PUT', `/repos/${repo}/pulls/${prNumber}/merge`, {
         merge_method: 'squash',
         commit_title: commitTitle,

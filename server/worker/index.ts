@@ -103,9 +103,13 @@ export async function graphStep(
   }
   helpers.logger.info('graph_step invoking heal graph', { runId })
 
-  const tools = deps.createTools(run)
+  // Built inside the try: the run is already `running`, so a factory that
+  // throws on the last attempt must still mark it failed or it stays
+  // `running` forever with no job left to reclaim it.
+  let tools: RunTools | undefined
 
   try {
+    tools = deps.createTools(run)
     const llmOptions = deps.llmOptions
     const checkpointer = deps.checkpointer
     const graph = compileOpenAiHealGraph(
@@ -135,7 +139,7 @@ export async function graphStep(
   } finally {
     // The worktree holds a checkout of someone's repository. It goes away
     // whether the run merged, gave up, or threw.
-    await tools.dispose?.().catch(() => {})
+    await tools?.dispose?.().catch(() => {})
   }
 }
 
