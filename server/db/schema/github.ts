@@ -12,7 +12,9 @@ export const githubInstallations = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     githubInstallationId: bigint('github_installation_id', { mode: 'number' }).notNull(),
     accountLogin: text('account_login').notNull(),
-    accountType: text('account_type').notNull(), // CHECK added in migration: 'User' | 'Organization'
+    // 'User' or 'Organization' from GitHub. Not checked: the webhook stores
+    // whatever the payload says, and GitHub may add account types.
+    accountType: text('account_type').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     suspendedAt: timestamp('suspended_at', { withTimezone: true }),

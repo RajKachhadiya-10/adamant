@@ -52,3 +52,15 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      # A schema change without `pnpm --filter @adamant/server db:generate`
+      # typechecks and tests fine, then the deployed database lacks the column.
+      # generate only diffs the schema against the last snapshot; it never
+      # connects, but drizzle.config.ts refuses to load without a URL.
+      - name: Migrations match the schema
+        env:
+          DATABASE_URL: postgres://unused
+        run: |
+          pnpm --filter @adamant/server db:generate
+          git status --porcelain -- server/db/drizzle
+          test -z "$(git status --porcelain -- server/db/drizzle)"
