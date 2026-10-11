@@ -58,6 +58,48 @@ describe('CI failure triage', () => {
     assert.match(failure.excerpt, /Error: boom/)
   })
 
+  it('keeps the error line in the excerpt when the lines after it are long', () => {
+    const log = [
+      'Error: boom',
+      ...Array.from({ length: 40 }, (_, index) => `${index} ${'x'.repeat(1_000)}`),
+      '    at src/app.ts:1:1',
+    ].join('\n')
+    const failure = parseFailure(log)
+
+    assert.ok(failure.excerpt.length <= 6_000)
+    assert.match(failure.excerpt, /^Error: boom\n/)
+    assert.match(failure.excerpt, /\n0 x+\n/, 'the lines after the error fill the budget in order')
+    assert.equal(failure.location, 'src/app.ts:1')
+  })
+
+  it('does not cut a line mid-way to fit the excerpt budget', () => {
+    const log = ['Error: boom', 'second line', 'third line', 'fourth line'].join('\n')
+    const failure = parseFailure(log, { maxExcerptChars: 30 })
+
+    assert.deepEqual(failure.excerpt.split('\n'), ['Error: boom', 'second line'])
+  })
+
+  it('parses a log with a very long line in bounded time', () => {
+    const log = ['Error: boom', `    ${'a'.repeat(200_000)}`, '    at src/app.ts:1:1'].join('\n')
+    const started = performance.now()
+    const failure = parseFailure(log)
+
+    assert.ok(performance.now() - started < 2_000, 'location matching must not backtrack per char')
+    assert.equal(failure.location, 'src/app.ts:1')
+    assert.match(
+      failure.excerpt,
+      /at src\/app\.ts:1:1/,
+      'a dump line is cut, not the lines after it',
+    )
+  })
+
+  it('cuts a one-line dump out of firstError before it reaches the prompt', () => {
+    const failure = parseFailure(`Error: ${'x'.repeat(5_000)}\n    at src/app.ts:1:1`)
+
+    assert.ok(String(failure.firstError).length <= 1_000)
+    assert.match(String(failure.firstError), /^Error: x+$/)
+  })
+
   it('does not throw on an empty or unrecognised log', () => {
     const empty = parseFailure('')
 
