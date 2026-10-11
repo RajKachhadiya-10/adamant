@@ -1,8 +1,6 @@
 import { join } from 'node:path'
-import { BrowserWindow } from 'electron'
-
-/** Vite's dev server URL, injected by `scripts/dev.mjs`; unset in production. */
-const devServerUrl = process.env.VITE_DEV_SERVER_URL
+import { app, BrowserWindow } from 'electron'
+import { devServerUrl } from './dev-server.mjs'
 
 const preloadScript = join(__dirname, '../../preload/dist/index.js')
 const rendererEntry = join(__dirname, '../../adamant/dist/index.html')
@@ -28,8 +26,9 @@ export function createMainWindow(): BrowserWindow {
   // Showing only once the first frame is painted avoids a white flash.
   window.once('ready-to-show', () => window.show())
 
-  if (devServerUrl) {
-    void window.loadURL(devServerUrl)
+  const devUrl = devServerUrl(process.env, app.isPackaged)
+  if (devUrl) {
+    void window.loadURL(devUrl)
     window.webContents.openDevTools({ mode: 'detach' })
   } else {
     void window.loadFile(rendererEntry)
