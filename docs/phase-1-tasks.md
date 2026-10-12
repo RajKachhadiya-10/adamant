@@ -21,7 +21,7 @@ Wiring: [backend-architecture.md](backend-architecture.md). Tables:
 | **2. LangGraph**  | `server/agent` + `server/worker`           | worker `invoke`s, `thread_id = run_id`                     |
 | **3. GitHub App** | `server/api`                               | App installed; failed CI starts a run; merges are recorded |
 | **4. Healing**    | tools + `server/sandbox` + OpenAI          | red CI → sandbox pass → our PR **merged**                  |
-| **5. CLI**        | `server/cli` (not created)                 | `watch` stays on the **hosted** API and shows runs/merges  |
+| **5. CLI**        | `cli/`                                     | `watch` stays on the **hosted** API and shows runs/merges  |
 
 `server/api` does **not** import `server/agent`. No `/agent` route.
 
@@ -29,7 +29,7 @@ Already done: Electron shell, `@adamant/server` (API, schema, worker, agent
 graph, sandbox), this repo’s CI. A failed `workflow_run` now inserts a
 `queued` run and enqueues `graph_step`; the worker claims it and runs the
 heal loop end to end (log triage → diagnose → patch → sandbox → PR → merge)
-against the GitHub App. Not done: the CLI, `POST /runs`, and `/activity` SSE.
+against the GitHub App. The CLI, `POST /runs`, and `/activity` SSE are implemented.
 
 ## Tasks
 
@@ -80,10 +80,10 @@ Eval repo: App may merge (contents + pull-requests write; no blocking reviews fo
 
 ### 5. CLI
 
-| ID  | Who | Task                                                  | Done when                                          |
-| --- | --- | ----------------------------------------------------- | -------------------------------------------------- |
-| 5.1 | R3  | Hosted `GET /activity` SSE (deliveries + audit)       | remote CLI can stay connected                      |
-| 5.2 | R3  | `@adamant/cli`: `status`, `runs`, `run <id>`, `watch` | CLI against the **hosted** URL shows the same feed |
+| ID  | Who | Task                                                  | Done when                                       |
+| --- | --- | ----------------------------------------------------- | ----------------------------------------------- |
+| 5.1 | R3  | Hosted `GET /activity` SSE (deliveries + audit)       | Done: remote CLI can stay connected             |
+| 5.2 | R3  | `@adamant/cli`: `status`, `runs`, `run <id>`, `watch` | Done: CLI against the **hosted** URL shows feed |
 
 CLI env: `ADAMANT_API_URL` (hosted origin) + `ADAMANT_SESSION`. Nothing
 else. `watch` is a long-lived SSE to that origin.

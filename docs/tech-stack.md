@@ -3,10 +3,10 @@
 What we chose and why. Phase 1 work: [phase-1-tasks.md](phase-1-tasks.md). Design:
 [backend-architecture.md](backend-architecture.md).
 
-`@adamant/server` already has the Hono API (health, runs, activity, GitHub
-webhooks), Drizzle schema, a graphile-worker process, the LangGraph code in
-`server/agent`, and a Docker sandbox runner. The worker's `graph_step` invokes
-`compileOpenAiHealGraph` with `thread_id = run_id`. The CLI does not exist yet.
+`@adamant/server` has the Hono API (health, runs, activity, GitHub webhooks),
+Drizzle schema, a graphile-worker process, the LangGraph code in `server/agent`, and a Docker
+sandbox runner. The worker's `graph_step` invokes `compileOpenAiHealGraph` with
+`thread_id = run_id`. `@adamant/cli` is an OpenTUI monitor connected to the hosted API.
 
 ## TypeScript everywhere
 
@@ -21,7 +21,7 @@ checkpoints). If it gets in the way, drive the same loop from `runs.status`.
 | Piece                 | Choice                                                              | Notes                                                                                          |
 | --------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | HTTP API              | [Hono](https://hono.dev) on `@hono/node-server`                     | Webhooks + CLI (`GET /runs`, `/activity`); raw body for HMAC                                   |
-| CLI                   | `@adamant/cli` on Node                                              | Monitor only; HTTPS to the hosted API; no model, no GitHub token                               |
+| CLI                   | `@adamant/cli` on OpenTUI / Node 26.4+                              | Minimal full-screen monitor; HTTPS to hosted API; no model or GitHub token                     |
 | Validation / contract | `zod`, via `@hono/zod-validator`                                    | One schema package shared by API, workers and app                                              |
 | GitHub App + webhooks | `@octokit/app`, `@octokit/webhooks`                                 | Installation tokens minted per call; webhook signature checks                                  |
 | Database              | PostgreSQL with Drizzle ORM                                         | Migrations checked in                                                                          |
@@ -60,7 +60,7 @@ server/             @adamant/server — one package.json and one tsconfig.json
   worker/           graphile-worker
   agent/            LangGraph + tools; no HTTP
   sandbox/          Docker runner
-  cli/              monitor — create
+  cli/              OpenTUI monitor
 ```
 
 `server` is the backend workspace package in `pnpm-workspace.yaml`.

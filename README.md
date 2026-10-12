@@ -72,8 +72,8 @@ Phase 1 is in progress ([docs/phase-1-tasks.md](docs/phase-1-tasks.md)).
 | Docker sandbox runner                                                  | Implemented                               |
 | `POST /runs`, `GET /runs`, `GET /runs/:id`                             | Implemented                               |
 | GitHub and Google OAuth, sessions, `GET /auth/me`                      | Implemented in the API; no Electron login |
-| `GET /activity` SSE feed                                               | Stub — answers JSON, does not stream yet  |
-| `@adamant/cli` (`status`, `runs`, `run <id>`, `watch`)                 | Not built yet                             |
+| `GET /activity` SSE feed                                               | Implemented                               |
+| `@adamant/cli` (`status`, `runs`, `run <id>`, `watch`)                 | Implemented                               |
 | Electron app                                                           | Shell only; healing does not run from it  |
 | Human-in-the-loop approval before merge                                | Phase 2                                   |
 
@@ -106,6 +106,22 @@ Real deliveries need a public URL: host the API, or point the App at smee/ngrok 
 developing it locally. Installing and subscribing the App is in
 [docs/product.md](docs/product.md#how-the-github-app-works).
 
+### CLI
+
+The full-screen CLI requires Node.js 26.4+ because its OpenTUI renderer uses Node's experimental
+FFI. It is only a session-authenticated monitor and trigger client: it never receives OpenAI or
+GitHub credentials, and it cannot merge a pull request.
+
+```bash
+export ADAMANT_API_URL=https://adamant.example
+export ADAMANT_SESSION=your-session-token
+pnpm adamant
+```
+
+`ADAMANT_API_URL` must be an HTTPS origin, except explicit `localhost` development URLs. Start
+with `pnpm adamant status`, `pnpm adamant runs`, `pnpm adamant run <id>`, or `pnpm adamant watch`
+to execute the same command in the interactive interface.
+
 ### Desktop shell
 
 ```bash
@@ -137,6 +153,7 @@ act on a repo, and the worker can do the work but never sees a user session.
 | `GITHUB_OAUTH_CLIENT_ID`, `_SECRET`, `_REDIRECT_URI` | API                  | Enables `GET /auth/github`; all three or the provider stays off     |
 | `GOOGLE_OAUTH_CLIENT_ID`, `_SECRET`, `_REDIRECT_URI` | API                  | Same, for `GET /auth/google`                                        |
 | `ADAMANT_SESSION_SECRET`, `ADAMANT_SEED_USER_ID`     | API                  | Seeded session used only when `DATABASE_URL` is unset               |
+| `ADAMANT_API_URL`, `ADAMANT_SESSION`                 | CLI                  | Hosted API origin and session; never a GitHub or OpenAI credential  |
 | `OPENAI_API_KEY`, `OPENAI_MODEL`                     | Worker               | Model calls happen here only — never in the API, CLI or Electron    |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`            | Worker               | An installation token is minted per call and stored nowhere         |
 | `ADAMANT_SANDBOX_IMAGE`, `_INSTALL`, `_TEST`         | Worker               | What the sandbox runs; install may reach the network, tests may not |
@@ -155,7 +172,7 @@ needs `pnpm --filter @adamant/server dev` with them in the environment.
 | `GET /auth/me`, `POST /auth/logout`  | session               | Current user; revoke the session                  |
 | `POST /runs`                         | session               | Start a run; needs an `Idempotency-Key`           |
 | `GET /runs`, `GET /runs/:id`         | session               | List runs; one run with its audit trail           |
-| `GET /activity`                      | session               | Feed for `adamant watch` (stub)                   |
+| `GET /activity`                      | session               | Server-Sent Event feed for `adamant watch`        |
 
 A session arrives as the `adamant_session` cookie, an `Authorization: Bearer` header, or an
 `ADAMANT_SESSION` header, never in the URL (query strings end up in access logs). `/auth/*` and the
@@ -177,6 +194,7 @@ CRUD routes behind the same auth, for development.
 | `pnpm package`                     | Installers in `release/` via electron-builder              |
 | `pnpm package:dir`                 | Unpacked app directory only, for smoke-testing a build     |
 | `pnpm clean`                       | Remove build output                                        |
+| `pnpm adamant [command]`           | Start the Codex-inspired Adamant terminal UI               |
 
 Backend scripts run through `pnpm --filter @adamant/server <script>`:
 
@@ -188,9 +206,16 @@ Backend scripts run through `pnpm --filter @adamant/server <script>`:
 | `db:migrate`                 | Apply migrations                             |
 | `db:studio`                  | Drizzle Studio against `DATABASE_URL`        |
 
+Inside the CLI, use `/help`, `/status`, `/runs`, `/run <id>`, `/watch`, or
+`/trigger <repositoryId> <fullSha>`. `/clear` and `/quit` manage the local interface. Tab
+completes a command; Up/Down or `j`/`k` navigate suggestions and results; Esc closes transient
+input; Ctrl+L clears output; Ctrl+C exits. `/watch` resumes its SSE stream with `Last-Event-ID`
+after a dropped connection.
+
 ## Layout
 
 ```
+cli/               @adamant/cli OpenTUI monitor and hosted API client
 electron/          desktop shell
   main/            Electron main process: window, IPC handlers
   preload/         the only bridge into the renderer (CommonJS)
