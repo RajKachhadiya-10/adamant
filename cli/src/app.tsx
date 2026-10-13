@@ -1,11 +1,13 @@
 import cliSpinners from 'cli-spinners'
 import { useKeyboard } from '@opentui/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { X_LOGO } from './branding.ts'
 import { type CommandDefinition, suggestionsFor } from './commands.ts'
 import { type CommandController, type OutputLine } from './controller.ts'
 import { type ActivityConnectionState, type ActivityEvent } from './sse.ts'
 
 const accent = '#55a8ff'
+const brandGold = '#d6a62b'
 const muted = '#8b949e'
 const error = '#f97583'
 const success = '#56d364'
@@ -174,17 +176,37 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
     const runId = typeof event.payload.runId === 'string' ? ` · ${event.payload.runId}` : ''
     return `${event.type}${runId}`
   })
+  const showBrand = lines.length === 0 && activityRows.length === 0
 
   return (
     <box flexDirection="column" style={{ height: '100%', paddingLeft: 1, paddingRight: 1 }}>
-      <box flexDirection="column">
-        <text fg={accent} attributes={1}>
-          Adamant
-        </text>
-        <text
-          fg={muted}
-        >{`v${process.env.npm_package_version ?? '0.1.0'} · ${process.cwd()}`}</text>
-      </box>
+      {showBrand ? (
+        <box flexDirection="row">
+          <box flexDirection="column">
+            {X_LOGO.map((row, index) => (
+              <text key={`${index}-${row}`} fg={brandGold} attributes={1}>
+                {row}
+              </text>
+            ))}
+          </box>
+          <box flexDirection="column" style={{ paddingLeft: 2, paddingTop: 2 }}>
+            <text fg={brandGold} attributes={1}>
+              ADAMANT
+            </text>
+            <text fg="#e6edf3">Hosted repair CLI</text>
+            <text fg={muted}>{`v${process.env.npm_package_version ?? '0.1.0'}`}</text>
+          </box>
+        </box>
+      ) : (
+        <box flexDirection="column">
+          <text fg={brandGold} attributes={1}>
+            ADAMANT
+          </text>
+          <text
+            fg={muted}
+          >{`v${process.env.npm_package_version ?? '0.1.0'} · ${process.cwd()}`}</text>
+        </box>
+      )}
 
       <box flexDirection="column" style={{ flexGrow: 1, paddingTop: 1 }}>
         {lines.map((entry, index) => (

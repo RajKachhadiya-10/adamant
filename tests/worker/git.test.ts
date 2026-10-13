@@ -374,11 +374,15 @@ describe('GitWorkspace against real git', () => {
     const { dir, ws } = await repoWithBase()
     const outside = await tempDir()
     await fs.writeFile(path.join(outside, 'secret.txt'), 'nope')
-    await fs.symlink(path.join(outside, 'secret.txt'), path.join(dir, 'link.txt'))
+    await fs.symlink(
+      outside,
+      path.join(dir, 'outside-link'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
 
     assert.equal(await ws.readFile('../secret.txt'), null)
     assert.equal(await ws.readFile(path.join(outside, 'secret.txt')), null)
-    assert.equal(await ws.readFile('link.txt'), null)
+    assert.equal(await ws.readFile('outside-link/secret.txt'), null)
     assert.equal(await ws.readFile('.git/config'), null)
     assert.equal(await ws.readFile('src'), null)
   })

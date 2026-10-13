@@ -21,7 +21,8 @@
     "cli-spinners": "^3.4.0",
     "react": "^19.2.4",
     "tsx": "^4.23.15",
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",

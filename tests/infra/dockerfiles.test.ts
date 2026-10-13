@@ -6,6 +6,10 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
+function fromRepo(file: string): string {
+  return path.join(repoRoot, ...file.split('/'))
+}
+
 /**
  * The images copy source directories one by one, so a new cross-directory
  * import (the worker reaching into server/api, say) boots fine locally and
@@ -44,7 +48,10 @@ function parseImage(file: string): Image {
   }
   assert.ok(entrypoint, `${file} has no CMD running a .ts entrypoint`)
   // The final stage works under /app, which is the build context.
-  return { entrypoint: path.join(path.relative('/app', workdir), entrypoint), copied }
+  return {
+    entrypoint: path.posix.join(path.posix.relative('/app', workdir), entrypoint),
+    copied,
+  }
 }
 
 const IMPORT_SPECIFIER =
@@ -58,12 +65,12 @@ function reachableFiles(entrypoint: string): Set<string> {
     const file = queue.pop()
     if (!file || seen.has(file)) continue
     seen.add(file)
-    const source = readFileSync(path.join(repoRoot, file), 'utf8')
+    const source = readFileSync(fromRepo(file), 'utf8')
     for (const match of source.matchAll(IMPORT_SPECIFIER)) {
       const specifier = match[1] ?? match[2]
       if (!specifier) continue
       if (specifier.startsWith('.')) {
-        queue.push(path.normalize(path.join(path.dirname(file), specifier)))
+        queue.push(path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier)))
       } else if (specifier === '@adamant/contract') {
         queue.push('contract/src/index.ts')
       }
