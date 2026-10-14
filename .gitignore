@@ -150,6 +150,9 @@ dist/
 release/
 *.tsbuildinfo
 
+# Rust
+target/
+
 # Editor
 .DS_Store
 

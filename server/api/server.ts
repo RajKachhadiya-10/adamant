@@ -3,6 +3,7 @@ import { Hono, type MiddlewareHandler } from 'hono'
 import { createDb, type Db } from '../db/client.ts'
 import { createApp, resourceNames } from './app.ts'
 import { createAuthMiddleware } from './middleware/auth.ts'
+import { type AuthenticatedSession } from './services/authService.ts'
 import { createActivityRoute } from './routes/activity.ts'
 import { createAuthRoute, type OAuthConfig } from './routes/auth.ts'
 import {
@@ -20,7 +21,7 @@ import {
   createPostgresRunApiStore,
   type RunApiStore,
 } from './services/runStore.ts'
-import { findInstalledRepository } from './services/repositoryLookup.ts'
+import { findInstalledRepository, listInstalledRepositories } from './services/repositoryLookup.ts'
 import { createWebhookService } from './services/webhookService.ts'
 import { createPostgresWebhookStore } from './services/webhookStore.ts'
 import { createGithubWebhookRoute } from './webhooks/github.ts'
@@ -41,6 +42,8 @@ export type ServerOptions = {
   oauthConfig?: OAuthConfig
   fetch?: typeof globalThis.fetch
   activityService?: ActivityService
+  /** Tests inject a session lookup. Production uses the database. */
+  authenticate?: (token: string) => Promise<AuthenticatedSession | null>
 }
 
 function readOAuthConfig(): OAuthConfig {
@@ -71,6 +74,7 @@ export function createServerApp(runStore?: RunApiStore, options: ServerOptions =
     options.database ?? (process.env.DATABASE_URL ? createDb(process.env.DATABASE_URL) : undefined)
   const authMiddleware = createAuthMiddleware({
     ...(database ? { database } : {}),
+    ...(options.authenticate ? { authenticate: options.authenticate } : {}),
   })
   const resolvedActivityService =
     options.activityService ??
@@ -92,8 +96,9 @@ export function createServerApp(runStore?: RunApiStore, options: ServerOptions =
   // the session lookup on every request.
   app.route('/runs', createRunsRoute(resolvedRunStore, alreadyAuthenticated))
 
-  // Confirmation is a `repositories` row the webhook wrote. The in-memory schema
-  // maps are a different store, so without Postgres these paths only explain that.
+  // Outer middleware authenticates. The route's own middleware is a no-op so
+  // the session lookup does not run twice. Without Postgres, 404 would mean
+  // "not installed yet" and the CLI would poll an in-memory row forever.
   app.use('/github', authMiddleware)
   app.use('/github/*', authMiddleware)
   if (database) {
@@ -102,6 +107,7 @@ export function createServerApp(runStore?: RunApiStore, options: ServerOptions =
       createGithubInstallRoute(
         {
           findRepository: (owner, name) => findInstalledRepository(database, owner, name),
+          listRepositories: () => listInstalledRepositories(database),
           readAppSlug: () => process.env.GITHUB_APP_SLUG,
         },
         alreadyAuthenticated,

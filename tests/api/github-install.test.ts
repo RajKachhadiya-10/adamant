@@ -7,16 +7,24 @@ import {
   APP_SLUG_UNCONFIGURED,
   createGithubInstallRoute,
   type FindInstalledRepository,
+  type ListInstalledRepositories,
 } from '../../server/api/routes/githubInstall.ts'
 import { createServerApp } from '../../server/api/server.ts'
 
 const session = 'secret'
 const seedUserId = '00000000-0000-0000-0000-000000000001'
 
-function routeFor(findRepository: FindInstalledRepository, readAppSlug: () => string | undefined) {
+function routeFor(
+  findRepository: FindInstalledRepository,
+  readAppSlug: () => string | undefined,
+  listRepositories: ListInstalledRepositories = async () => [],
+) {
   return createGithubInstallRoute(
-    { findRepository, readAppSlug },
-    createAuthMiddleware({ legacySession: { token: session, userId: seedUserId } }),
+    { findRepository, listRepositories, readAppSlug },
+    createAuthMiddleware({
+      authenticate: async (token) =>
+        token === session ? { sessionId: 'session-1', userId: seedUserId } : null,
+    }),
   )
 }
 
@@ -30,6 +38,7 @@ describe('GitHub App install routes', () => {
     )
     assert.equal((await app.request('/install')).status, 401)
     assert.equal((await app.request('/installations/status?owner=acme&name=eval')).status, 401)
+    assert.equal((await app.request('/repositories')).status, 401)
   })
 
   it('returns 503 when the App slug is unset', async () => {
@@ -109,6 +118,30 @@ describe('GitHub App install routes', () => {
     })
   })
 
+  it('lists repositories already stored, without an installation id or a GitHub token', async () => {
+    let calls = 0
+    const app = routeFor(
+      async () => null,
+      () => 'adamant',
+      async () => {
+        calls += 1
+        return [{ id: 'repo-1', owner: 'acme', name: 'eval', defaultBranch: 'main' }]
+      },
+    )
+
+    const response = await app.request('/repositories', { headers: authed })
+    const body = (await response.json()) as { repositories: Record<string, unknown>[] }
+
+    assert.equal(response.status, 200)
+    assert.equal(calls, 1)
+    assert.deepEqual(Object.keys(body.repositories[0] ?? {}).sort(), [
+      'defaultBranch',
+      'id',
+      'name',
+      'owner',
+    ])
+  })
+
   it('rejects wildcards, extra query keys, and repeated names without looking them up', async () => {
     let calls = 0
     const app = routeFor(
@@ -142,22 +175,22 @@ describe('install routes without a database', () => {
     else process.env.DATABASE_URL = previousDatabase
     if (previousSlug === undefined) delete process.env.GITHUB_APP_SLUG
     else process.env.GITHUB_APP_SLUG = previousSlug
-    delete process.env.ADAMANT_SESSION_SECRET
-    delete process.env.ADAMANT_SEED_USER_ID
   })
 
   it('says confirmation needs Postgres and ignores the in-memory repository map', async () => {
     delete process.env.DATABASE_URL
     process.env.GITHUB_APP_SLUG = 'adamant'
-    process.env.ADAMANT_SESSION_SECRET = session
-    process.env.ADAMANT_SEED_USER_ID = seedUserId
-    const app = createServerApp()
+    const app = createServerApp(undefined, {
+      authenticate: async (token) =>
+        token === session ? { sessionId: 'session-1', userId: seedUserId } : null,
+    })
 
     assert.equal((await app.request('/github/install')).status, 401)
     assert.equal(
       (await app.request('/github/installations/status?owner=acme&name=eval')).status,
       401,
     )
+    assert.equal((await app.request('/github/repositories')).status, 401)
 
     const created = await app.request('/repositories', {
       method: 'POST',
@@ -180,5 +213,9 @@ describe('install routes without a database', () => {
     })
     assert.equal(status.status, 503)
     assert.deepEqual(await status.json(), { error: INSTALL_CONFIRMATION_NEEDS_DATABASE })
+
+    const listed = await app.request('/github/repositories', { headers: authed })
+    assert.equal(listed.status, 503)
+    assert.deepEqual(await listed.json(), { error: INSTALL_CONFIRMATION_NEEDS_DATABASE })
   })
 })

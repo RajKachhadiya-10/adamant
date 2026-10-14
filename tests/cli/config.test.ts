@@ -3,15 +3,16 @@ import { describe, it } from 'node:test'
 import { loadCliConfig } from '../../cli/src/config.ts'
 
 describe('Adamant CLI configuration', () => {
-  it('defaults to the local API and requires a session', () => {
+  it('defaults to the local API and starts without a session', () => {
     assert.equal(
       loadCliConfig({ ADAMANT_SESSION: 'session' }).apiUrl.origin,
       'http://localhost:8787',
     )
-    assert.throws(() => loadCliConfig({}), /ADAMANT_SESSION/)
-    assert.throws(
-      () => loadCliConfig({ ADAMANT_API_URL: 'https://adamant.example' }),
-      /ADAMANT_SESSION/,
+    assert.equal(loadCliConfig({}).apiUrl.origin, 'http://localhost:8787')
+    assert.equal(loadCliConfig({}).session, undefined)
+    assert.equal(
+      loadCliConfig({ ADAMANT_API_URL: 'https://adamant.example' }).apiUrl.origin,
+      'https://adamant.example',
     )
   })
 

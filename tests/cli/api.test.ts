@@ -112,6 +112,96 @@ describe('Adamant API client', () => {
     })
   })
 
+  it('loads the public install URL and treats a missing route as no database', async () => {
+    let request: Request | undefined
+    const api = new AdamantApi(config, async (input, init) => {
+      request = new Request(input, init)
+      return Response.json({ url: 'https://github.com/apps/adamant/installations/new' })
+    })
+
+    assert.equal(await api.installUrl(), 'https://github.com/apps/adamant/installations/new')
+    assert.equal(new URL(request?.url ?? '').pathname, '/github/install')
+
+    const missing = new AdamantApi(config, async () => new Response(null, { status: 404 }))
+    await assert.rejects(missing.installUrl(), /hosted API with Postgres/)
+  })
+
+  it('polls one repository and does not treat 404 as a finished install', async () => {
+    let request: Request | undefined
+    const api = new AdamantApi(config, async (input, init) => {
+      request = new Request(input, init)
+      return Response.json({ owner: 'acme', name: 'eval', defaultBranch: 'main' })
+    })
+
+    assert.deepEqual(await api.installationStatus('acme', 'eval'), {
+      owner: 'acme',
+      name: 'eval',
+      defaultBranch: 'main',
+    })
+    const url = new URL(request?.url ?? '')
+    assert.equal(url.pathname, '/github/installations/status')
+    assert.equal(url.searchParams.get('owner'), 'acme')
+    assert.equal(url.searchParams.get('name'), 'eval')
+
+    const waiting = new AdamantApi(config, async () =>
+      Response.json({ error: 'Adamant is not installed on this repository.' }, { status: 404 }),
+    )
+    assert.equal(await waiting.installationStatus('acme', 'eval'), null)
+  })
+
+  it('refuses an install URL that is not the GitHub App page', async () => {
+    const api = new AdamantApi(config, async () =>
+      Response.json({ url: 'https://evil.example/apps/adamant/installations/new' }),
+    )
+    await assert.rejects(api.installUrl(), /does not understand/)
+  })
+
+  it('lists known repositories and does not send a session to start login', async () => {
+    const seen: { path: string; authorization: string | null }[] = []
+    const unsigned = loadCliConfig({ ADAMANT_API_URL: 'https://adamant.example' })
+    const api = new AdamantApi(unsigned, async (input, init) => {
+      const url = new URL(String(input))
+      seen.push({
+        path: url.pathname,
+        authorization: new Headers(init?.headers).get('Authorization'),
+      })
+      if (url.pathname === '/auth/github/cli/start') {
+        return Response.json({
+          loginId: 'login-id',
+          pollSecret: 'poll-secret-value',
+          beginPath: '/auth/github/cli/begin?login=login-id',
+        })
+      }
+      if (url.pathname === '/auth/github/cli/token') {
+        return Response.json({ status: 'pending' }, { status: 202 })
+      }
+      return Response.json({
+        repositories: [{ id: 'repo-1', owner: 'acme', name: 'eval', defaultBranch: 'main' }],
+      })
+    })
+
+    const started = await api.startCliLogin()
+    assert.equal(started.beginPath, '/auth/github/cli/begin?login=login-id')
+    assert.equal(seen[0]?.authorization, null)
+    assert.equal(await api.pollCliLogin(started.loginId, started.pollSecret), null)
+
+    api.setSession('session-secret')
+    const repos = await api.listRepositories()
+    assert.equal(repos[0]?.owner, 'acme')
+    assert.equal(seen.at(-1)?.path, '/github/repositories')
+    assert.equal(seen.at(-1)?.authorization, 'Bearer session-secret')
+  })
+
+  it('refuses repository calls until someone signs in', async () => {
+    const api = new AdamantApi(
+      loadCliConfig({ ADAMANT_API_URL: 'https://adamant.example' }),
+      async () => {
+        throw new Error('should not fetch')
+      },
+    )
+    await assert.rejects(api.listRuns(), /Sign in first/)
+  })
+
   it('does not time out the activity stream, which stays open by design', async () => {
     let signal: AbortSignal | null | undefined
     const api = new AdamantApi(

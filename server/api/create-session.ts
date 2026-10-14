@@ -7,10 +7,10 @@ import { createSession } from './services/authService.ts'
 
 /**
  * Mints a session for `adamant` against a Postgres-backed API. OAuth hands its
- * session to a browser as an HttpOnly cookie a terminal cannot read, and the
- * seeded ADAMANT_SESSION_SECRET applies only without a database, so without
- * this the CLI had no way in. The token is printed once; Postgres keeps only
- * its hash, it expires like an OAuth session, and POST /auth/logout revokes it.
+ * session to a browser as an HttpOnly cookie a terminal cannot read. Login in
+ * the CLI collects that same session once through a one-time code; this command
+ * is the other way in. The token is printed once; Postgres keeps only its hash,
+ * it expires like an OAuth session, and POST /auth/logout revokes it.
  *
  *   export ADAMANT_SESSION=$(pnpm --silent --filter @adamant/server session:create)
  */

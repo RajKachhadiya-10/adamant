@@ -29,8 +29,7 @@ services:
       DATABASE_URL: postgres://adamant:adamant@postgres:5432/adamant
       # The API verifies the HMAC and enqueues. It gets no GitHub App key.
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
-      # Sessions live in Postgres here; ADAMANT_SESSION_SECRET applies only
-      # without a database. Mint one for the CLI with:
+      # Sessions live in Postgres. Mint one for the CLI with:
       #   docker compose exec api node --experimental-strip-types api/create-session.ts
     depends_on:
       postgres:

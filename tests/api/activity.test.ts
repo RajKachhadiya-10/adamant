@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { afterEach, beforeEach, describe, it } from 'node:test'
+import { describe, it } from 'node:test'
 import { type Pool } from 'pg'
 import { createActivityRoute } from '../../server/api/routes/activity.ts'
-import { createServerApp } from '../../server/api/server.ts'
+import { createServerApp, type ServerOptions } from '../../server/api/server.ts'
 import {
   ACTIVITY_CHANNEL,
   createActivityService,
@@ -12,7 +12,14 @@ import {
 import { webhookDeliveries, type Db } from '../../server/db/client.ts'
 
 const SESSION = 'test-session-secret'
-const SEED_USER_ID = '00000000-0000-0000-0000-000000000001'
+
+function authenticatedApp(runStore?: undefined, options: ServerOptions = {}) {
+  return createServerApp(runStore, {
+    ...options,
+    authenticate: async (token) =>
+      token === SESSION ? { sessionId: 'session-1', userId: 'user-1' } : null,
+  })
+}
 
 const waitTick = (ms = 15) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -41,18 +48,8 @@ async function readStreamFrame(
 }
 
 describe('Activity SSE Stream', () => {
-  beforeEach(() => {
-    process.env.ADAMANT_SESSION_SECRET = SESSION
-    process.env.ADAMANT_SEED_USER_ID = SEED_USER_ID
-  })
-
-  afterEach(() => {
-    delete process.env.ADAMANT_SESSION_SECRET
-    delete process.env.ADAMANT_SEED_USER_ID
-  })
-
   it('unauthenticated request returns 401', async () => {
-    const app = createServerApp()
+    const app = authenticatedApp()
     const res = await app.request('/activity')
     assert.equal(res.status, 401)
   })
@@ -60,7 +57,7 @@ describe('Activity SSE Stream', () => {
   it('authenticated request succeeds', async () => {
     const controller = new AbortController()
     try {
-      const app = createServerApp()
+      const app = authenticatedApp()
       const res = await app.request('/activity', {
         headers: { ADAMANT_SESSION: SESSION },
         signal: controller.signal,
@@ -74,7 +71,7 @@ describe('Activity SSE Stream', () => {
   it('SSE response headers/content type are correct', async () => {
     const controller = new AbortController()
     try {
-      const app = createServerApp()
+      const app = authenticatedApp()
       const res = await app.request('/activity', {
         headers: { ADAMANT_SESSION: SESSION },
         signal: controller.signal,
@@ -98,7 +95,7 @@ describe('Activity SSE Stream', () => {
 
     const controller = new AbortController()
     try {
-      const app = createServerApp(undefined, { activityService })
+      const app = authenticatedApp(undefined, { activityService })
       const res = await app.request('/activity', {
         headers: { ADAMANT_SESSION: SESSION },
         signal: controller.signal,
@@ -120,7 +117,7 @@ describe('Activity SSE Stream', () => {
 
   it('new activity reaches connected clients', async () => {
     const activityService = createActivityService()
-    const app = createServerApp(undefined, { activityService })
+    const app = authenticatedApp(undefined, { activityService })
 
     const controller = new AbortController()
     try {
@@ -159,7 +156,7 @@ describe('Activity SSE Stream', () => {
 
   it('disconnect removes the subscription/listener', async () => {
     const activityService = createActivityService()
-    const app = createServerApp(undefined, { activityService })
+    const app = authenticatedApp(undefined, { activityService })
 
     assert.equal(activityService.subscriberCount(), 0)
 
@@ -203,7 +200,7 @@ describe('Activity SSE Stream', () => {
 
     const controller = new AbortController()
     try {
-      const app = createServerApp(undefined, { activityService })
+      const app = authenticatedApp(undefined, { activityService })
 
       // Reconnect with Last-Event-ID: evt_2
       const res = await app.request('/activity', {
@@ -249,7 +246,7 @@ describe('Activity SSE Stream', () => {
 
     const controller = new AbortController()
     try {
-      const app = createServerApp(undefined, { activityService })
+      const app = authenticatedApp(undefined, { activityService })
 
       // Reconnect after evt_a: should still replay evt_b with identical timestamp
       const res = await app.request('/activity', {
@@ -340,7 +337,7 @@ describe('Activity SSE Stream', () => {
       },
     }
 
-    const app = createServerApp(undefined, { activityService: customService })
+    const app = authenticatedApp(undefined, { activityService: customService })
     const controller = new AbortController()
 
     try {

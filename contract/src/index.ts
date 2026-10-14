@@ -111,6 +111,60 @@ export const GithubInstallationStatusSchema = z
 
 export type GithubInstallationStatus = z.infer<typeof GithubInstallationStatusSchema>
 
+export const GithubRepositorySchema = z
+  .object({
+    id: IdentifierSchema,
+    owner: GithubOwnerSchema,
+    name: GithubRepoNameSchema,
+    defaultBranch: z.string().min(1).max(1024),
+  })
+  .strict()
+
+export type GithubRepository = z.infer<typeof GithubRepositorySchema>
+
+export const GithubRepositoryListSchema = z
+  .object({
+    repositories: z.array(GithubRepositorySchema),
+  })
+  .strict()
+
+export type GithubRepositoryList = z.infer<typeof GithubRepositoryListSchema>
+
 /** The API and the CLI both say this. A 404 on the status route means "not installed yet". */
 export const INSTALL_CONFIRMATION_NEEDS_DATABASE =
   'Install confirmation needs the hosted API with Postgres.'
+
+const cliLoginId = z.string().min(1).max(200)
+
+/** Browser path only. The poll secret stays in the POST body, never this URL. */
+export const CliLoginStartSchema = z
+  .object({
+    loginId: cliLoginId,
+    pollSecret: z.string().min(1).max(200),
+    beginPath: z.string().regex(/^\/auth\/github\/cli\/begin\?login=[A-Za-z0-9_-]+$/),
+  })
+  .strict()
+
+export type CliLoginStart = z.infer<typeof CliLoginStartSchema>
+
+export const CliLoginPollSchema = z
+  .object({
+    loginId: cliLoginId,
+    pollSecret: z.string().min(1).max(200),
+  })
+  .strict()
+
+export const CliLoginPendingSchema = z
+  .object({
+    status: z.literal('pending'),
+  })
+  .strict()
+
+export const CliLoginTokenSchema = z
+  .object({
+    token: z
+      .string()
+      .min(1)
+      .refine((token) => !/[\s\p{Cc}]/u.test(token)),
+  })
+  .strict()

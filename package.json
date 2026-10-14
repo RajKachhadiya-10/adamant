@@ -19,6 +19,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "adamant": "pnpm --filter @adamant/cli start",
+    "tui": "cargo run --manifest-path tui/Cargo.toml",
     "start": "pnpm build && electron .",
     "package": "pnpm build && electron-builder --config electron-builder.yml",
     "package:dir": "pnpm build && electron-builder --config electron-builder.yml --dir",

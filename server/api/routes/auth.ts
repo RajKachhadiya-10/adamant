@@ -1,8 +1,10 @@
+import { CliLoginPollSchema, CliLoginStartSchema } from '@adamant/contract'
 import { Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
-import { timingSafeEqual } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 
 import { type Db } from '../../db/client.ts'
+import { createCliLoginStore, type CliLoginStore } from '../services/cliLogin.ts'
 import {
   createAuthMiddleware,
   SESSION_COOKIE_NAME,
@@ -35,7 +37,16 @@ export type OAuthConfig = {
 
 export type AuthRouteOptions = {
   fetch?: typeof globalThis.fetch
+  /** Holds an Adamant session token in memory until the CLI reads it once. */
+  cliLogins?: CliLoginStore
 }
+
+/** Static on purpose: the session token must not be interpolated into the page. */
+const CLI_SIGNED_IN_PAGE = `<!doctype html>
+<meta charset="utf-8">
+<title>Adamant</title>
+<p>Signed in. Return to the terminal.</p>
+`
 
 class OAuthConfigurationError extends Error {}
 class InvalidOAuthStateError extends Error {}
@@ -48,14 +59,8 @@ function getProviderConfig(config: OAuthConfig, provider: OAuthProvider): OAuthP
   return providerConfig
 }
 
-async function createOAuthAuthorizationUrl(
-  db: Db,
-  config: OAuthConfig,
-  provider: OAuthProvider,
-): Promise<{ state: string; url: string }> {
+function authorizationUrlFor(config: OAuthConfig, provider: OAuthProvider, state: string): string {
   const providerConfig = getProviderConfig(config, provider)
-  const state = await createOAuthState(db, provider)
-
   const params = new URLSearchParams({
     client_id: providerConfig.clientId,
     redirect_uri: providerConfig.redirectUri,
@@ -64,15 +69,23 @@ async function createOAuthAuthorizationUrl(
 
   if (provider === 'github') {
     params.set('scope', 'read:user user:email')
-
-    return { state, url: `https://github.com/login/oauth/authorize?${params.toString()}` }
+    return `https://github.com/login/oauth/authorize?${params.toString()}`
   }
 
   params.set('response_type', 'code')
   params.set('scope', 'openid email profile')
   params.set('access_type', 'offline')
+  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`
+}
 
-  return { state, url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}` }
+async function createOAuthAuthorizationUrl(
+  db: Db,
+  config: OAuthConfig,
+  provider: OAuthProvider,
+): Promise<{ state: string; url: string }> {
+  getProviderConfig(config, provider)
+  const state = await createOAuthState(db, provider)
+  return { state, url: authorizationUrlFor(config, provider, state) }
 }
 
 function oauthStateCookieName(provider: OAuthProvider): string {
@@ -298,6 +311,7 @@ export function createAuthRoute(db: Db, config: OAuthConfig, options: AuthRouteO
   const auth = new Hono<{ Variables: AuthVariables }>()
   const fetchProvider = options.fetch ?? globalThis.fetch
   const requireSession = createAuthMiddleware({ database: db })
+  const cliLogins = options.cliLogins ?? createCliLoginStore()
 
   for (const provider of ['github', 'google'] as const) {
     auth.get(`/${provider}`, async (c) => {
@@ -338,6 +352,7 @@ export function createAuthRoute(db: Db, config: OAuthConfig, options: AuthRouteO
 
       try {
         const session = await handleOAuthCallback(db, config, fetchProvider, provider, code, state)
+        const deliveredToCli = provider === 'github' && cliLogins.complete(state, session.token)
         setCookie(c, SESSION_COOKIE_NAME, session.token, {
           httpOnly: true,
           secure: true,
@@ -345,6 +360,10 @@ export function createAuthRoute(db: Db, config: OAuthConfig, options: AuthRouteO
           path: '/',
           maxAge: SESSION_MAX_AGE_SECONDS,
         })
+        if (deliveredToCli) {
+          c.header('Cache-Control', 'no-store')
+          return c.html(CLI_SIGNED_IN_PAGE)
+        }
         return c.json({ authenticated: true })
       } catch (error) {
         console.error(`${provider} OAuth callback failed`, error)
@@ -355,6 +374,69 @@ export function createAuthRoute(db: Db, config: OAuthConfig, options: AuthRouteO
       }
     })
   }
+
+  auth.post('/github/cli/start', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    try {
+      getProviderConfig(config, 'github')
+      const state = await createOAuthState(db, 'github')
+      const loginId = randomBytes(32).toString('base64url')
+      const pollSecret = randomBytes(32).toString('base64url')
+      cliLogins.put({
+        loginId,
+        pollSecret,
+        state,
+        expiresAt: Date.now() + OAUTH_STATE_MAX_AGE_SECONDS * 1000,
+      })
+      const payload = CliLoginStartSchema.safeParse({
+        loginId,
+        pollSecret,
+        beginPath: `/auth/github/cli/begin?login=${loginId}`,
+      })
+      if (!payload.success) {
+        return c.json({ error: 'OAuth authentication is unavailable' }, 500)
+      }
+      return c.json(payload.data)
+    } catch (error) {
+      console.error('GitHub CLI login failed to start', error)
+      return c.json({ error: 'OAuth authentication is unavailable' }, oauthFailureStatus(error))
+    }
+  })
+
+  auth.get('/github/cli/begin', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    const loginId = c.req.query('login')
+    if (!loginId || loginId.length > 200) {
+      return c.json({ error: 'Sign-in expired or unknown.' }, 400)
+    }
+    try {
+      const pending = cliLogins.begin(loginId)
+      if (!pending) return c.json({ error: 'Sign-in expired or unknown.' }, 400)
+      const url = authorizationUrlFor(config, 'github', pending.state)
+      setCookie(c, oauthStateCookieName('github'), pending.state, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'Lax',
+        path: oauthStateCookiePath('github'),
+        maxAge: OAUTH_STATE_MAX_AGE_SECONDS,
+      })
+      return c.redirect(url)
+    } catch (error) {
+      console.error('GitHub CLI login could not redirect', error)
+      return c.json({ error: 'OAuth authentication is unavailable' }, oauthFailureStatus(error))
+    }
+  })
+
+  auth.post('/github/cli/token', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    const body: unknown = await c.req.json().catch(() => null)
+    const parsed = CliLoginPollSchema.safeParse(body)
+    if (!parsed.success) return c.json({ error: 'Sign-in expired or unknown.' }, 400)
+    const result = cliLogins.take(parsed.data.loginId, parsed.data.pollSecret)
+    if (result.status === 'pending') return c.json({ status: 'pending' }, 202)
+    if (result.status === 'missing') return c.json({ error: 'Sign-in expired or unknown.' }, 404)
+    return c.json({ token: result.token })
+  })
 
   auth.use('/logout', requireSession)
   auth.post('/logout', async (c) => {

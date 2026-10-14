@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import { afterEach, describe, it } from 'node:test'
 import { RunDetailSchema, RunSummarySchema, type RunSummary } from '@adamant/contract'
-import { createServerApp, shutdownGracefully } from '../../server/api/server.ts'
+import { createServerApp, type ServerOptions, shutdownGracefully } from '../../server/api/server.ts'
 import { createActivityService } from '../../server/api/services/activityService.ts'
 import { type RunApiStore } from '../../server/api/services/runStore.ts'
 
@@ -28,16 +28,20 @@ const store = {
   detail: async () => null,
 } satisfies RunApiStore
 
+function authenticatedApp(runStore?: RunApiStore, options: ServerOptions = {}) {
+  return createServerApp(runStore, {
+    ...options,
+    authenticate: async (token) =>
+      token === session ? { sessionId: 'session-1', userId: seedUserId } : null,
+  })
+}
+
 describe('composed API', () => {
   afterEach(() => {
-    delete process.env.ADAMANT_SESSION_SECRET
-    delete process.env.ADAMANT_SEED_USER_ID
     delete process.env.GITHUB_WEBHOOK_SECRET
   })
   it('leaves health open and protects runs', async () => {
-    process.env.ADAMANT_SESSION_SECRET = session
-    process.env.ADAMANT_SEED_USER_ID = seedUserId
-    const app = createServerApp(store)
+    const app = authenticatedApp(store)
     assert.equal((await app.request('/health')).status, 200)
 
     const blocked = await app.request('/runs', {
@@ -67,9 +71,7 @@ describe('composed API', () => {
   })
 
   it('requires a session for every schema resource, not only /runs', async () => {
-    process.env.ADAMANT_SESSION_SECRET = session
-    process.env.ADAMANT_SEED_USER_ID = seedUserId
-    const app = createServerApp()
+    const app = authenticatedApp()
 
     const blockedRead = await app.request('/sessions')
     assert.equal(blockedRead.status, 401)
@@ -97,10 +99,8 @@ describe('composed API', () => {
   })
 
   it('serves the CLI run contract without a database', async () => {
-    process.env.ADAMANT_SESSION_SECRET = session
-    process.env.ADAMANT_SEED_USER_ID = seedUserId
     const activityService = createActivityService()
-    const app = createServerApp(undefined, { activityService })
+    const app = authenticatedApp(undefined, { activityService })
     // What the CLI sends: a bearer token and camelCase fields.
     const headers = {
       Authorization: `Bearer ${session}`,

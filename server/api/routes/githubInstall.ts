@@ -4,8 +4,10 @@ import {
   GithubInstallUrlSchema,
   GithubOwnerSchema,
   GithubRepoNameSchema,
+  GithubRepositorySchema,
   INSTALL_CONFIRMATION_NEEDS_DATABASE,
   type GithubInstallationStatus,
+  type GithubRepository,
 } from '@adamant/contract'
 import { Hono, type MiddlewareHandler } from 'hono'
 import { createAuthMiddleware, type AuthVariables } from '../middleware/auth.ts'
@@ -21,8 +23,11 @@ export type FindInstalledRepository = (
   name: string,
 ) => Promise<GithubInstallationStatus | null>
 
+export type ListInstalledRepositories = () => Promise<readonly GithubRepository[]>
+
 export type GithubInstallRouteOptions = {
   findRepository: FindInstalledRepository
+  listRepositories: ListInstalledRepositories
   /** Read at request time so a missing slug is a 503, not a URL with an empty segment. */
   readAppSlug?: () => string | undefined
 }
@@ -41,6 +46,7 @@ export function createGithubInstallUnavailableRoute(
   route.get('/installations/status', (c) =>
     c.json({ error: INSTALL_CONFIRMATION_NEEDS_DATABASE }, 503),
   )
+  route.get('/repositories', (c) => c.json({ error: INSTALL_CONFIRMATION_NEEDS_DATABASE }, 503))
   return route
 }
 
@@ -91,6 +97,21 @@ export function createGithubInstallRoute(
     })
     if (!body.success) return c.json({ error: 'Adamant is not installed on this repository.' }, 404)
     return c.json(body.data)
+  })
+
+  route.get('/repositories', async (c) => {
+    const rows = await options.listRepositories()
+    const repositories: GithubRepository[] = []
+    for (const row of rows) {
+      const parsed = GithubRepositorySchema.safeParse({
+        id: row.id,
+        owner: row.owner,
+        name: row.name,
+        defaultBranch: row.defaultBranch,
+      })
+      if (parsed.success) repositories.push(parsed.data)
+    }
+    return c.json({ repositories })
   })
 
   return route

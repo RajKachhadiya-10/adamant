@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
-import { afterEach, describe, it } from 'node:test'
+import { describe, it } from 'node:test'
 import { type RunSummary } from '@adamant/contract'
+import { createAuthMiddleware } from '../../server/api/middleware/auth.ts'
 import { createRunsRoute } from '../../server/api/routes/runs.ts'
 import { type RunApiStore, UnknownRepositoryError } from '../../server/api/services/runStore.ts'
 
@@ -17,20 +18,24 @@ const run: RunSummary = {
   updatedAt: '1970-01-01T00:00:00.000Z',
 }
 
+function routeFor(store: RunApiStore) {
+  return createRunsRoute(
+    store,
+    createAuthMiddleware({
+      authenticate: async (token) =>
+        token === session ? { sessionId: 'session-1', userId } : null,
+    }),
+  )
+}
+
 describe('CLI run routes', () => {
-  afterEach(() => {
-    delete process.env.ADAMANT_SESSION_SECRET
-    delete process.env.ADAMANT_SEED_USER_ID
-  })
   it('authenticates and creates, lists, and reads persisted runs', async () => {
     const store = {
       create: async () => ({ run, created: true }),
       list: async () => [run],
       detail: async () => ({ run, auditEvents: [] }),
     } satisfies RunApiStore
-    const route = createRunsRoute(store)
-    process.env.ADAMANT_SESSION_SECRET = session
-    process.env.ADAMANT_SEED_USER_ID = userId
+    const route = routeFor(store)
     assert.equal((await route.request('/')).status, 401)
     const headers = { ADAMANT_SESSION: session }
     assert.equal((await route.request('/', { headers })).status, 200)
@@ -57,9 +62,7 @@ describe('CLI run routes', () => {
       list: async () => [],
       detail: async () => null,
     } satisfies RunApiStore
-    process.env.ADAMANT_SESSION_SECRET = session
-    process.env.ADAMANT_SEED_USER_ID = userId
-    const route = createRunsRoute(store)
+    const route = routeFor(store)
 
     for (const sourceSha of ['abc123', '--upload-pack=touch /tmp/x', 'HEAD']) {
       const response = await route.request('/', {
@@ -86,9 +89,7 @@ describe('CLI run routes', () => {
       list: async () => [],
       detail: async () => null,
     } satisfies RunApiStore
-    process.env.ADAMANT_SESSION_SECRET = session
-    process.env.ADAMANT_SEED_USER_ID = userId
-    const route = createRunsRoute(store)
+    const route = routeFor(store)
     const headers = {
       ADAMANT_SESSION: session,
       'content-type': 'application/json',
@@ -122,9 +123,7 @@ describe('CLI run routes', () => {
       list: async () => [],
       detail: async () => null,
     } satisfies RunApiStore
-    process.env.ADAMANT_SESSION_SECRET = session
-    process.env.ADAMANT_SEED_USER_ID = userId
-    const route = createRunsRoute(store)
+    const route = routeFor(store)
     const valid = { repositoryId: 'repo-1', sourceSha: 'a'.repeat(40) }
 
     const longKey = await route.request('/', {
@@ -159,9 +158,7 @@ describe('CLI run routes', () => {
       list: async () => [],
       detail: async () => null,
     } satisfies RunApiStore
-    process.env.ADAMANT_SESSION_SECRET = session
-    process.env.ADAMANT_SEED_USER_ID = userId
-    const route = createRunsRoute(store)
+    const route = routeFor(store)
 
     const response = await route.request('/', {
       method: 'POST',

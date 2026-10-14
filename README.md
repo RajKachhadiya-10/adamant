@@ -95,10 +95,9 @@ The full-screen CLI requires Node.js 26.4+ because its OpenTUI renderer uses Nod
 FFI. It is only a session-authenticated monitor and trigger client: it never receives OpenAI or
 GitHub credentials, and it cannot merge a pull request.
 
-It needs a session. Against an API with a database, mint one; the token is printed once and only
-its hash is stored. It lasts 30 days, and `POST /auth/logout` with it revokes it. Under Compose,
-run `docker compose exec -T api node --experimental-strip-types api/create-session.ts` instead.
-Against an API without a database, the session is its `ADAMANT_SESSION_SECRET`.
+It needs a session. Mint one; the token is printed once and only its hash is stored. It lasts 30
+days, and `POST /auth/logout` with it revokes it. Under Compose, run
+`docker compose exec -T api node --experimental-strip-types api/create-session.ts` instead.
 
 ```bash
 export ADAMANT_SESSION=$(pnpm --silent --filter @adamant/server session:create)
@@ -157,7 +156,6 @@ act on a repo, and the worker can do the work but never sees a user session.
 | `GITHUB_APP_SLUG`                                    | API                  | Public App slug for the install URL; not a credential               |
 | `GITHUB_OAUTH_CLIENT_ID`, `_SECRET`, `_REDIRECT_URI` | API                  | Enables `GET /auth/github`; all three or the provider stays off     |
 | `GOOGLE_OAUTH_CLIENT_ID`, `_SECRET`, `_REDIRECT_URI` | API                  | Same, for `GET /auth/google`                                        |
-| `ADAMANT_SESSION_SECRET`, `ADAMANT_SEED_USER_ID`     | API                  | Seeded session used only when `DATABASE_URL` is unset               |
 | `ADAMANT_API_URL`, `ADAMANT_SESSION`                 | CLI                  | Hosted API origin and session; never a GitHub or OpenAI credential  |
 | `OPENAI_API_KEY`, `OPENAI_MODEL`                     | Worker               | Model calls happen here only — never in the API, CLI or Electron    |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`            | Worker               | An installation token is minted per call and stored nowhere         |
@@ -185,10 +183,10 @@ A session arrives as the `adamant_session` cookie, an `Authorization: Bearer` he
 `ADAMANT_SESSION` header, never in the URL (query strings end up in access logs). The CLI sends
 `Authorization: Bearer`, because proxies such as nginx drop header names with underscores.
 `/auth/*` and the Postgres-backed install and runs routers mount only when `DATABASE_URL` is set.
-Without it, `/github/install` and `/github/installations/status` answer that install confirmation
-needs the hosted API with Postgres, and they do not read the in-memory schema maps. `/runs` keeps
-the same contract over an in-memory store.
-The remaining schema tables are also exposed as CRUD routes behind the same auth, for development.
+Without it, `/github/install`, `/github/installations/status`, and `/github/repositories` answer
+that install confirmation needs the hosted API with Postgres, and they do not read the in-memory
+schema maps. `/runs` keeps the same contract over an in-memory store. The remaining schema tables
+are also exposed as CRUD routes behind the same auth, for development.
 
 `/activity` LISTENs on Postgres (`adamant_activity`, notified by insert triggers on `audit_events`
 and `webhook_deliveries`), so a new row reaches `adamant watch` in milliseconds. A one-second poll

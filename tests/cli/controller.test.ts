@@ -212,6 +212,176 @@ describe('/install', () => {
     await assert.rejects(controller.execute('/install acme/eval'), /App slug is not configured/)
     assert.equal(opened, false)
   })
+
+  it('does not open a browser for a name that is not owner/repo', async () => {
+    let opened = false
+    const controller = installController({
+      openUrl: async () => {
+        opened = true
+        return true
+      },
+    })
+
+    await assert.rejects(controller.execute('/install nope'), /GitHub names/)
+    assert.equal(opened, false)
+  })
+})
+
+describe('login and repositories', () => {
+  const sessionToken = 'adamant-session-token'
+
+  function loginApi(options: { session?: string; poll?: () => Response; repos?: () => Response }) {
+    const calls: { path: string; authorization: string | null }[] = []
+    const api = new AdamantApi(
+      loadCliConfig({
+        ADAMANT_API_URL: 'https://adamant.example',
+        ...(options.session ? { ADAMANT_SESSION: options.session } : {}),
+      }),
+      async (input, init) => {
+        const url = new URL(String(input))
+        calls.push({
+          path: url.pathname,
+          authorization: new Headers(init?.headers).get('Authorization'),
+        })
+        if (url.pathname === '/auth/github/cli/start') {
+          return Response.json({
+            loginId: 'login-id',
+            pollSecret: 'poll-secret-value',
+            beginPath: '/auth/github/cli/begin?login=login-id',
+          })
+        }
+        if (url.pathname === '/auth/github/cli/token') {
+          return options.poll?.() ?? Response.json({ token: sessionToken })
+        }
+        if (url.pathname === '/github/repositories') {
+          return options.repos?.() ?? Response.json({ repositories: [] })
+        }
+        if (url.pathname === '/health') return Response.json({ status: 'ok' })
+        return Response.json({ error: 'unexpected' }, { status: 500 })
+      },
+    )
+    return { api, calls }
+  }
+
+  it('does not start GitHub login when a session was already provided', async () => {
+    const opened: string[] = []
+    const { api, calls } = loginApi({ session: 'already' })
+    const controller = new CommandController(api, {
+      openUrl: async (url) => {
+        opened.push(url)
+        return true
+      },
+    })
+
+    const lines = await texts(controller, '/login')
+
+    assert.equal(lines[0]?.text, 'Signed in.')
+    assert.deepEqual(opened, [])
+    assert.deepEqual(calls, [])
+  })
+
+  it('opens GitHub OAuth and keeps only the Adamant session', async () => {
+    const opened: string[] = []
+    let polls = 0
+    const { api, calls } = loginApi({
+      poll: () => {
+        polls += 1
+        return polls < 2
+          ? Response.json({ status: 'pending' }, { status: 202 })
+          : Response.json({ token: sessionToken })
+      },
+    })
+    const controller = new CommandController(api, {
+      pollIntervalMs: 0,
+      openUrl: async (url) => {
+        opened.push(url)
+        return true
+      },
+    })
+
+    const lines = await texts(controller, '/login')
+    const text = lines.map((entry) => entry.text).join('\n')
+
+    assert.deepEqual(opened, ['https://adamant.example/auth/github/cli/begin?login=login-id'])
+    assert.match(text, /Waiting for GitHub/)
+    assert.match(text, /Signed in\./)
+    assert.doesNotMatch(text, /poll-secret-value/)
+    assert.doesNotMatch(text, new RegExp(sessionToken))
+    assert.equal(calls[0]?.authorization, null)
+    assert.equal(controller.signedIn, true)
+
+    await texts(controller, '/repos')
+    assert.equal(calls.at(-1)?.authorization, `Bearer ${sessionToken}`)
+    assert.equal(calls.at(-1)?.path, '/github/repositories')
+  })
+
+  it('stops waiting to sign in when the user aborts', async () => {
+    const abort = new AbortController()
+    const { api } = loginApi({
+      poll: () => Response.json({ status: 'pending' }, { status: 202 }),
+    })
+    const controller = new CommandController(api, {
+      pollIntervalMs: 1_000,
+      openUrl: async () => {
+        abort.abort()
+        return true
+      },
+    })
+
+    const result = await controller.execute('/login', abort.signal)
+    assert.equal(result.kind, 'output')
+    const text = result.kind === 'output' ? result.lines.map((entry) => entry.text).join('\n') : ''
+    assert.match(text, /Stopped waiting to sign in/)
+    assert.equal(controller.signedIn, false)
+  })
+
+  it('does not open a browser when GitHub OAuth is not configured', async () => {
+    let opened = false
+    const api = new AdamantApi(
+      loadCliConfig({ ADAMANT_API_URL: 'https://adamant.example' }),
+      async () => Response.json({ error: 'OAuth authentication is unavailable' }, { status: 503 }),
+    )
+    const controller = new CommandController(api, {
+      openUrl: async () => {
+        opened = true
+        return true
+      },
+    })
+
+    await assert.rejects(controller.execute('/login'), /OAuth authentication is unavailable/)
+    assert.equal(opened, false)
+  })
+
+  it('says when no repository is connected and lists ones the API already knows', async () => {
+    const { api } = loginApi({ session: 's' })
+    const empty = new CommandController(api)
+    const none = await texts(empty, '/repos')
+    assert.match(none.map((entry) => entry.text).join('\n'), /Choose Connect/)
+
+    const { api: listed } = loginApi({
+      session: 's',
+      repos: () =>
+        Response.json({
+          repositories: [{ id: 'repo-1', owner: 'acme', name: 'eval', defaultBranch: 'main' }],
+        }),
+    })
+    const lines = await texts(new CommandController(listed), '/repos')
+    const text = lines.map((entry) => entry.text).join('\n')
+    assert.match(text, /acme\/eval/)
+    assert.match(text, /main/)
+    assert.doesNotMatch(text, /installation|token/i)
+  })
+
+  it('reports a signed-out status without calling /runs', async () => {
+    const { api, calls } = loginApi({})
+    const lines = await texts(new CommandController(api), '/status')
+    assert.match(lines[0]?.text ?? '', /healthy/)
+    assert.match(lines[1]?.text ?? '', /Not signed in/)
+    assert.equal(
+      calls.some((call) => call.path === '/runs'),
+      false,
+    )
+  })
 })
 
 describe('browser opener', () => {

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 
 import { createAuthMiddleware } from '../../server/api/middleware/auth.ts'
 import { createAuthRoute } from '../../server/api/routes/auth.ts'
+import { createCliLoginStore } from '../../server/api/services/cliLogin.ts'
 import { createRunsRoute } from '../../server/api/routes/runs.ts'
 import { consumeOAuthState, upsertOAuthIdentity } from '../../server/api/services/authService.ts'
 import { type RunApiStore } from '../../server/api/services/runStore.ts'
@@ -78,32 +79,19 @@ describe('session authentication', () => {
     assert.equal(authenticatedToken, 'cookie-token')
   })
 
-  it('keeps the seeded session as a database-free fallback', async () => {
-    let authenticatedUserId: string | undefined
+  it('refuses a token when no session store is configured', async () => {
     const store = {
       create: async () => {
         throw new Error('not used')
       },
-      list: async (userId) => {
-        authenticatedUserId = userId
-        return []
-      },
+      list: async () => [],
       detail: async () => null,
     } satisfies RunApiStore
-    const app = createRunsRoute(
-      store,
-      createAuthMiddleware({
-        legacySession: {
-          token: 'seed-token',
-          userId: 'seed-user',
-        },
-      }),
-    )
+    const app = createRunsRoute(store, createAuthMiddleware())
 
-    assert.equal((await app.request('/', { headers: { ADAMANT_SESSION: 'wrong' } })).status, 401)
     const response = await app.request('/', { headers: { ADAMANT_SESSION: 'seed-token' } })
-    assert.equal(response.status, 200)
-    assert.equal(authenticatedUserId, 'seed-user')
+    assert.equal(response.status, 500)
+    assert.deepEqual(await response.json(), { error: 'Server misconfiguration' })
   })
 
   it('ignores a session token in the query string', async () => {
@@ -383,5 +371,153 @@ describe('OAuth routes', () => {
     assert.match(cookie ?? '', /Secure/i)
     assert.match(cookie ?? '', /SameSite=Lax/i)
     assert.doesNotMatch(body, /provider-token/)
+  })
+})
+
+describe('CLI GitHub login', () => {
+  const github = {
+    clientId: 'client',
+    clientSecret: 'super-secret-value',
+    redirectUri: 'http://localhost/callback',
+  }
+
+  it('fails closed when GitHub OAuth is not configured', async () => {
+    const app = createAuthRoute({} as Db, {})
+    const response = await app.request('/github/cli/start', { method: 'POST' })
+
+    assert.equal(response.status, 503)
+    assert.deepEqual(await response.json(), { error: 'OAuth authentication is unavailable' })
+  })
+
+  it('keeps the Adamant session in memory until the CLI reads it once', () => {
+    const store = createCliLoginStore(() => 1_000)
+    store.put({ loginId: 'lid', pollSecret: 'secret', state: 'state', expiresAt: 2_000 })
+
+    assert.deepEqual(store.take('lid', 'other'), { status: 'missing' })
+    assert.deepEqual(store.take('lid', 'secret'), { status: 'pending' })
+    assert.equal(store.complete('state', 'session-token'), true)
+    assert.deepEqual(store.take('lid', 'secret'), { status: 'ready', token: 'session-token' })
+    assert.deepEqual(store.take('lid', 'secret'), { status: 'missing' })
+
+    const expired = createCliLoginStore(() => 5_000)
+    expired.put({ loginId: 'lid', pollSecret: 'secret', state: 'state', expiresAt: 4_000 })
+    assert.equal(expired.begin('lid'), undefined)
+  })
+
+  it('returns the session token once to the CLI and not in the browser page', async () => {
+    let storedState: string | undefined
+    const database = {
+      insert: () => ({
+        values: (value: { state?: string }) => {
+          if (value.state) storedState = value.state
+          return { returning: async () => [{ id: 'session-1' }] }
+        },
+      }),
+      delete: () => ({
+        where: () => ({
+          returning: async () => [{ id: 'state-1' }],
+        }),
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [{ userId: 'user-1' }],
+          }),
+        }),
+      }),
+      update: () => ({
+        set: () => ({
+          where: async () => {},
+        }),
+      }),
+    } as unknown as Db
+    const providerResponses = [
+      Response.json({ access_token: 'provider-token' }),
+      Response.json({ id: 123, login: 'octocat' }),
+      Response.json([]),
+    ]
+    const app = createAuthRoute(
+      database,
+      { github },
+      {
+        fetch: async () => {
+          const response = providerResponses.shift()
+          if (!response) throw new Error('unexpected provider request')
+          return response
+        },
+      },
+    )
+
+    const started = await app.request('/github/cli/start', { method: 'POST' })
+    assert.equal(started.status, 200)
+    const startBody = (await started.json()) as {
+      loginId: string
+      pollSecret: string
+      beginPath: string
+    }
+    assert.match(startBody.beginPath, /^\/auth\/github\/cli\/begin\?login=[A-Za-z0-9_-]+$/)
+    assert.equal(JSON.stringify(startBody).includes('super-secret-value'), false)
+    assert.equal(JSON.stringify(startBody).includes('provider-token'), false)
+
+    const pending = await app.request('/github/cli/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ loginId: startBody.loginId, pollSecret: 'wrong-secret' }),
+    })
+    assert.equal(pending.status, 404)
+
+    const waiting = await app.request('/github/cli/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ loginId: startBody.loginId, pollSecret: startBody.pollSecret }),
+    })
+    assert.equal(waiting.status, 202)
+
+    // This app is the /auth router. The CLI opens beginPath on the full API.
+    const begin = await app.request(startBody.beginPath.replace(/^\/auth/, ''))
+    assert.equal(begin.status, 302)
+    const location = new URL(begin.headers.get('location') ?? '')
+    const state = location.searchParams.get('state')
+    const stateCookie = begin.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith('adamant_oauth_github_state='))
+
+    assert.equal(location.origin + location.pathname, 'https://github.com/login/oauth/authorize')
+    assert.equal(state, storedState)
+    assert.equal(location.searchParams.get('client_id'), 'client')
+    assert.equal(location.searchParams.has('client_secret'), false)
+    assert.match(stateCookie ?? '', /HttpOnly/i)
+
+    const callback = await app.request(`/github/callback?code=code&state=${state ?? ''}`, {
+      headers: { Cookie: stateCookie?.split(';')[0] ?? '' },
+    })
+    const html = await callback.text()
+    const sessionCookie = callback.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith('adamant_session='))
+    const sessionToken = sessionCookie?.match(/^adamant_session=([^;]+)/)?.[1]
+
+    assert.equal(callback.status, 200)
+    assert.match(callback.headers.get('content-type') ?? '', /text\/html/)
+    assert.match(html, /Return to the terminal/)
+    assert.equal(html.includes('provider-token'), false)
+    assert.equal(html.includes('super-secret-value'), false)
+    assert.ok(sessionToken)
+    assert.equal(html.includes(sessionToken), false)
+
+    const ready = await app.request('/github/cli/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ loginId: startBody.loginId, pollSecret: startBody.pollSecret }),
+    })
+    assert.equal(ready.status, 200)
+    assert.deepEqual(await ready.json(), { token: sessionToken })
+
+    const again = await app.request('/github/cli/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ loginId: startBody.loginId, pollSecret: startBody.pollSecret }),
+    })
+    assert.equal(again.status, 404)
   })
 })

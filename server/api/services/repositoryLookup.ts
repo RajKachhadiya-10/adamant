@@ -1,5 +1,10 @@
-import { and, desc, eq } from 'drizzle-orm'
-import { GithubInstallationStatusSchema, type GithubInstallationStatus } from '@adamant/contract'
+import { and, asc, desc, eq } from 'drizzle-orm'
+import {
+  GithubInstallationStatusSchema,
+  GithubRepositorySchema,
+  type GithubInstallationStatus,
+  type GithubRepository,
+} from '@adamant/contract'
 import { repositories, type Db } from '../../db/client.ts'
 
 /**
@@ -27,4 +32,27 @@ export async function findInstalledRepository(
   if (!row) return null
   const parsed = GithubInstallationStatusSchema.safeParse(row)
   return parsed.success ? parsed.data : null
+}
+
+/**
+ * Repositories the webhook has already written. No GitHub call and no user
+ * token: a session only authorizes reading this table.
+ */
+export async function listInstalledRepositories(db: Db): Promise<GithubRepository[]> {
+  const rows = await db
+    .select({
+      id: repositories.id,
+      owner: repositories.owner,
+      name: repositories.name,
+      defaultBranch: repositories.defaultBranch,
+    })
+    .from(repositories)
+    .orderBy(asc(repositories.owner), asc(repositories.name), desc(repositories.updatedAt))
+
+  const listed: GithubRepository[] = []
+  for (const row of rows) {
+    const parsed = GithubRepositorySchema.safeParse(row)
+    if (parsed.success) listed.push(parsed.data)
+  }
+  return listed
 }

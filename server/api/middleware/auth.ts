@@ -1,6 +1,5 @@
 import { type Context, type Next } from 'hono'
 import { getCookie } from 'hono/cookie'
-import { timingSafeEqual } from 'node:crypto'
 
 import { type Db } from '../../db/client.ts'
 import { authenticateSession, type AuthenticatedSession } from '../services/authService.ts'
@@ -15,16 +14,6 @@ export const SESSION_COOKIE_NAME = 'adamant_session'
 export type AuthMiddlewareOptions = {
   database?: Db
   authenticate?: (token: string) => Promise<AuthenticatedSession | null>
-  legacySession?: {
-    token: string
-    userId: string
-  }
-}
-
-function safeEqual(a: string, b: string): boolean {
-  const bufferA = Buffer.from(a)
-  const bufferB = Buffer.from(b)
-  return bufferA.length === bufferB.length && timingSafeEqual(bufferA, bufferB)
 }
 
 function readBearerToken(header: string | undefined): string | undefined {
@@ -34,7 +23,6 @@ function readBearerToken(header: string | undefined): string | undefined {
 
 export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
   const database = options.database
-  const configuredLegacySession = options.legacySession
   const authenticate =
     options.authenticate ??
     (database ? (token: string) => authenticateSession(database, token) : undefined)
@@ -53,38 +41,18 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
     }
 
     try {
-      if (authenticate) {
-        const session = await authenticate(token)
-
-        if (!session) {
-          return c.json({ error: 'Unauthorized' }, 401)
-        }
-
-        c.set('userId', session.userId)
-        c.set('sessionId', session.sessionId)
-        await next()
-        return
-      }
-
-      const legacySession =
-        configuredLegacySession ??
-        (process.env.ADAMANT_SESSION_SECRET && process.env.ADAMANT_SEED_USER_ID
-          ? {
-              token: process.env.ADAMANT_SESSION_SECRET,
-              userId: process.env.ADAMANT_SEED_USER_ID,
-            }
-          : undefined)
-
-      if (!legacySession) {
+      if (!authenticate) {
         throw new Error('No session authentication method is configured')
       }
 
-      if (!safeEqual(token, legacySession.token)) {
+      const session = await authenticate(token)
+
+      if (!session) {
         return c.json({ error: 'Unauthorized' }, 401)
       }
 
-      c.set('userId', legacySession.userId)
-      c.set('sessionId', 'seeded-session')
+      c.set('userId', session.userId)
+      c.set('sessionId', session.sessionId)
       await next()
     } catch (error) {
       console.error('Failed to authenticate session', error)
