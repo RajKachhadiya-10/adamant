@@ -1,6 +1,6 @@
 # Tech stack
 
-What we chose and why. Phase 1 work: [phase-1-tasks.md](phase-1-tasks.md). Design:
+What we chose and why. Task list: [tasks.md](tasks.md). Design:
 [backend-architecture.md](backend-architecture.md).
 
 `@adamant/server` has the Hono API (health, runs, activity, GitHub webhooks),
@@ -26,7 +26,7 @@ checkpoints). If it gets in the way, drive the same loop from `runs.status`.
 | GitHub App + webhooks | `@octokit/app`, `@octokit/webhooks`                                 | Installation tokens minted per call; webhook signature checks                                  |
 | Database              | PostgreSQL with Drizzle ORM                                         | Migrations checked in                                                                          |
 | Job queue             | `graphile-worker`                                                   | Postgres `SKIP LOCKED` plus `LISTEN/NOTIFY` for instant pickup                                 |
-| Agent graph           | `@langchain/langgraph` + `@langchain/langgraph-checkpoint-postgres` | `thread_id = run_id`; Phase 1 does not `interrupt()` for a human                               |
+| Agent graph           | `@langchain/langgraph` + `@langchain/langgraph-checkpoint-postgres` | `thread_id = run_id`; the graph does not `interrupt()` for a human                             |
 | LLM                   | [`openai`](https://www.npmjs.com/package/openai)                    | `OPENAI_API_KEY`; model and effort per step — see [performance.md](performance.md#model-calls) |
 | Sandbox               | `docker` CLI via `child_process`                                    | One container per job, as in the architecture doc                                              |
 
@@ -47,20 +47,21 @@ const app = new Hono().post('/runs', zValidator('json', CreateRunSchema), async 
 
 Fallback: Fastify. Skip NestJS and Express.
 
-Phase 1 clients: GitHub webhooks and `@adamant/cli` against the hosted
+Clients today: GitHub webhooks and `@adamant/cli` against the hosted
 API. Electron can import `typeof app` later via `hc<ApiType>`.
 
 ## Layout
 
 ```
-electron/           desktop shell (later Heal UI)
+cli/                @adamant/cli OpenTUI monitor
+contract/           shared zod schemas
+electron/           desktop shell (Heal UI later)
 server/             @adamant/server — one package.json and one tsconfig.json
   api/              Hono: webhooks, runs, /activity
   db/               Drizzle; drizzle.config.ts lives here
   worker/           graphile-worker
   agent/            LangGraph + tools; no HTTP
   sandbox/          Docker runner
-  cli/              OpenTUI monitor
 ```
 
 `server` is the backend workspace package in `pnpm-workspace.yaml`.

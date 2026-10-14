@@ -31,15 +31,15 @@ word does not make sense.
 | **Checkpoint**     | LangGraph's saved graph state, written to Postgres and keyed by thread id. Lets a worker that died mid-run resume instead of restarting.       |
 | **Worktree**       | A second checkout of an already-cloned repo (`git worktree add`). Cheaper than cloning again for every run.                                    |
 | **Sandbox**        | A throwaway container that runs the repo's tests with the network off. One per attempt, destroyed afterwards.                                  |
-| **Verdict**        | What the sandbox concluded: `pass` or `fail`. A timeout is a `fail`.                                                                           |
+| **Verdict**        | What the sandbox concluded: `pass`, `fail`, `timeout`, or `error`. Only `pass` may publish.                                                    |
 | **Artifact**       | A file the run produced and we kept, such as sandbox logs. Stored outside Postgres; the database holds only its key.                           |
 
 ## Permissions and safety
 
 | Term                   | Meaning                                                                                                                                       |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| **HITL**               | Human in the loop — later. Phase 1 skips it and merges after a passing sandbox.                                                               |
-| **merge_pull_request** | The only merge tool. It may merge `runs.pr_number` when the head is `adamant/{run_id}` and the latest sandbox verdict is `pass`.              |
+| **HITL**               | Human in the loop — later. The heal merges after a passing sandbox.                                                                           |
+| **merge_pull_request** | The only merge tool. It may merge the PR in `pr_publications` when the head is `adamant/{run_id}` and the latest sandbox verdict is `pass`.   |
 | **Tool**               | A named, allowlisted function the model may call (`get_failed_job_logs`), instead of running shell commands itself.                           |
 | **Tool gateway**       | The layer every tool call goes through. It checks the allowlist, scopes the call to the run's repo, redacts the arguments, and logs the call. |
 | **Fail closed**        | When a request is not explicitly allowed, deny it. An unknown tool is refused, not guessed at.                                                |
@@ -47,12 +47,12 @@ word does not make sense.
 | **Installation token** | A short-lived GitHub token minted from the installation. Created per call and thrown away.                                                    |
 | **Delivery ID**        | GitHub's `X-GitHub-Delivery` header, unique per webhook delivery. Our deduplication key.                                                      |
 | **Idempotency key**    | What stops one event creating two runs: `workflow_run:{head_sha}`, or the client's `Idempotency-Key` header.                                  |
-| **Seeded user**        | The placeholder row in `users` that owns Phase 1 runs, standing in for a real account until GitHub OAuth exists.                              |
+| **Seeded user**        | The placeholder row in `users` that owns runs until a real account exists.                                                                    |
 
 ## Process
 
 | Term              | Meaning                                                                                                                  |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| **Phase**         | A stage of the roadmap in [product.md](product.md#roadmap). Phase 1 is the backend.                                      |
+| **Phase**         | A stage of the roadmap in [product.md](product.md#later). The current product is the hosted backend and CLI.             |
 | **Seat (R1–R10)** | One person's slot on the mid-eval team. Who holds which seat is in [mid-eval-backend-plan.md](mid-eval-backend-plan.md). |
 | **Workstream**    | Database, graph, GitHub App, healing, CLI.                                                                               |

@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import {
   auditEvents,
   githubInstallations,
@@ -57,6 +57,8 @@ export interface WebhookStore {
   /** Null when an identical idempotency key already created a run. */
   createQueuedRun(input: QueuedRunInput): Promise<string | null>
   findRunByPullRequest(repositoryId: string, prNumber: number): Promise<string | null>
+  /** Idempotent. A merge of our PR confirms the run; it does not start another. */
+  markRunSucceeded(runId: string): Promise<void>
   recordAudit(
     runId: string | null,
     eventType: string,
@@ -176,6 +178,17 @@ export function createPostgresWebhookStore(db: Db): WebhookStore {
       return rows[0]?.runId ?? null
     },
 
+    async markRunSucceeded(runId) {
+      await db
+        .update(runs)
+        .set({
+          status: 'succeeded',
+          updatedAt: new Date(),
+          version: sql`${runs.version} + 1`,
+        })
+        .where(eq(runs.id, runId))
+    },
+
     async recordAudit(runId, eventType, payload) {
       await db.insert(auditEvents).values({ runId, eventType, payload })
     },
@@ -189,6 +202,8 @@ export interface MemoryWebhookStore extends WebhookStore {
   readonly audits: { runId: string | null; eventType: string }[]
   /** Seeded by tests so a merged-PR delivery can find a run. */
   readonly publishedPrs: Map<string, string>
+  readonly runStatuses: Map<string, string>
+  readonly boundRepoIds: number[]
 }
 
 export function createMemoryWebhookStore(): MemoryWebhookStore {
@@ -197,6 +212,8 @@ export function createMemoryWebhookStore(): MemoryWebhookStore {
   const enqueuedRuns: string[] = []
   const audits: { runId: string | null; eventType: string }[] = []
   const publishedPrs = new Map<string, string>()
+  const runStatuses = new Map<string, string>()
+  const boundRepoIds: number[] = []
   const installations = new Map<number, string>()
   const repos = new Map<number, string>()
   const idempotencyKeys = new Set<string>()
@@ -207,6 +224,8 @@ export function createMemoryWebhookStore(): MemoryWebhookStore {
     enqueuedRuns,
     audits,
     publishedPrs,
+    runStatuses,
+    boundRepoIds,
     transaction(callback) {
       return callback(store)
     },
@@ -218,6 +237,7 @@ export function createMemoryWebhookStore(): MemoryWebhookStore {
       return id
     },
     async upsertRepository(input) {
+      if (!boundRepoIds.includes(input.githubRepoId)) boundRepoIds.push(input.githubRepoId)
       const existing = repos.get(input.githubRepoId)
       if (existing) return existing
       const id = `repository-${input.githubRepoId}`
@@ -239,6 +259,9 @@ export function createMemoryWebhookStore(): MemoryWebhookStore {
     },
     async findRunByPullRequest(repositoryId, prNumber) {
       return publishedPrs.get(`${repositoryId}#${prNumber}`) ?? null
+    },
+    async markRunSucceeded(runId) {
+      runStatuses.set(runId, 'succeeded')
     },
     async recordAudit(runId, eventType) {
       audits.push({ runId, eventType })

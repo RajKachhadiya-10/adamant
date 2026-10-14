@@ -28,8 +28,8 @@ import { users } from './users.ts'
  * IDEMPOTENCY: enforced by a partial unique index on (repositoryId, idempotencyKey)
  * WHERE idempotencyKey IS NOT NULL. Scoped to repository (not global) because an
  * idempotency key is a caller-chosen string meaningful only within one caller's
- * context. NULL is excluded from the constraint so webhook-triggered runs (which
- * have no client-supplied key) never collide with each other.
+ * context. NULL is excluded so rows without a key do not collide. Webhook heals
+ * use `workflow_run:{head_sha}`.
  *
  * VERSION: a plain integer, incremented by the application inside every
  * state-changing UPDATE using `WHERE id = $1 AND version = $2` (optimistic

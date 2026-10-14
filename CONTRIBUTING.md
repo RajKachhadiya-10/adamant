@@ -9,7 +9,7 @@ pnpm install
 pnpm dev
 ```
 
-Phase 1 work is [docs/phase-1-tasks.md](docs/phase-1-tasks.md). Layout and
+The task list is [docs/tasks.md](docs/tasks.md). Layout and
 security: [AGENTS.md](AGENTS.md) (applies to people as well as agents).
 
 ## Workflow

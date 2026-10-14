@@ -1,4 +1,4 @@
-import type { Context, Next } from 'hono'
+import { type Context, type Next } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { timingSafeEqual } from 'node:crypto'
 
@@ -84,7 +84,7 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
       }
 
       c.set('userId', legacySession.userId)
-      c.set('sessionId', 'phase-1-seeded-session')
+      c.set('sessionId', 'seeded-session')
       await next()
     } catch (error) {
       console.error('Failed to authenticate session', error)

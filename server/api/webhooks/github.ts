@@ -14,8 +14,11 @@ function verifySignature(signature: string | null, rawBody: string, secret: stri
     const hmac = crypto.createHmac('sha256', secret)
     hmac.update(rawBody)
     const expectedSignature = `sha256=${hmac.digest('hex')}`
+    const actual = Buffer.from(signature)
+    const expected = Buffer.from(expectedSignature)
+    if (actual.length !== expected.length) return false
 
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature))
+    return crypto.timingSafeEqual(actual, expected)
   } catch {
     return false
   }
@@ -66,7 +69,7 @@ export function createGithubWebhookRoute(service?: WebhookService) {
     }
 
     try {
-      await (service ?? defaultWebhookService()).processEvent(deliveryId, event, payload)
+      await (service ?? defaultWebhookService()).processEvent(deliveryId, event, payload, rawBody)
       return c.json({ message: 'Accepted' }, 202)
     } catch (error: unknown) {
       // A replay is not an error for GitHub; ACK it and do not start a second run.

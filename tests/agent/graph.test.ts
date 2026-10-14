@@ -145,9 +145,21 @@ describe('SecureGitClient Tool Boundary', () => {
     await assert.rejects(client({}).push('main'), /Unauthorized push attempt/)
   })
 
-  it('accepts push to adamant/{run_id}', async () => {
+  it('accepts push to adamant/{run_id} after a passing sandbox', async () => {
     let pushedBranch = ''
-    const gateway = client({ push: async (branch) => void (pushedBranch = branch) }, 'run-123')
+    const recorder = createMemoryRecorder()
+    await recorder.sandboxResult({
+      attemptNumber: 1,
+      candidateHash: 'hash',
+      baseSha: 'abc',
+      commands: [],
+      verdict: 'pass',
+    })
+    const gateway = client(
+      { push: async (branch) => void (pushedBranch = branch) },
+      'run-123',
+      recorder,
+    )
 
     await gateway.push('adamant/run-123')
     assert.strictEqual(pushedBranch, 'adamant/run-123')

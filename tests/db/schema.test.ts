@@ -5,7 +5,7 @@ import { createDb } from '../../server/db/client.ts'
 import * as schema from '../../server/db/schema/index.ts'
 
 describe('database schema', () => {
-  it('exports the Phase 1 tables and no jobs table', () => {
+  it('exports the application tables and no jobs table', () => {
     const names = [
       schema.users,
       schema.sessions,

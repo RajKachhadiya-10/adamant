@@ -35,7 +35,9 @@ export const compileHealGraph = (
     .addConditionalEdges('sandboxNode', (state: AgentState) =>
       state.sandboxResult?.verdict === 'pass' ? 'openPrNode' : retryOrGiveUp(state),
     )
-    .addEdge('openPrNode', 'mergePrNode')
+    .addConditionalEdges('openPrNode', (state: AgentState) =>
+      state.status === 'failed' || !state.prNumber ? END : 'mergePrNode',
+    )
     .addEdge('mergePrNode', END)
     .addEdge('giveUpNode', END)
 

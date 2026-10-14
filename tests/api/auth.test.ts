@@ -78,7 +78,7 @@ describe('session authentication', () => {
     assert.equal(authenticatedToken, 'cookie-token')
   })
 
-  it('keeps the seeded Phase 1 session as a database-free fallback', async () => {
+  it('keeps the seeded session as a database-free fallback', async () => {
     let authenticatedUserId: string | undefined
     const store = {
       create: async () => {

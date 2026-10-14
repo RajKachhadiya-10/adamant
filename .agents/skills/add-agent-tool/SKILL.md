@@ -43,9 +43,10 @@ Force-pushing, pushing to the default branch, deleting the default branch, chang
 rulesets or admin settings, minting tokens, acting on any repo other than the run's bound repo,
 merging a PR this run did not open.
 
-`merge_pull_request` is allowed **only** for `runs.pr_number` when the head is
-`adamant/{run_id}` and the latest `sandbox_results.verdict` is `pass`. The adapter
-reads those from the run; the model does not pass an arbitrary PR number.
+`merge_pull_request` is allowed **only** for the PR recorded in `pr_publications`
+when the head is `adamant/{run_id}` and the latest `sandbox_results.verdict` is
+`pass`. The adapter reads those from the run; the model does not pass an arbitrary
+PR number.
 
 ## Tests
 

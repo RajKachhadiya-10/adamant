@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createHmac } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { afterEach, describe, it } from 'node:test'
 import { createGithubWebhookRoute } from '../../server/api/webhooks/github.ts'
 import {
@@ -125,7 +125,8 @@ describe('GitHub webhook', () => {
 
   it('accepts a signed ping and ignores a replay of the same delivery', async () => {
     await withSecret(async () => {
-      const route = createGithubWebhookRoute(service().webhooks)
+      const { store, webhooks } = service()
+      const route = createGithubWebhookRoute(webhooks)
       const body = JSON.stringify({ zen: 'keep it logically awesome' })
       const headers = {
         'x-github-delivery': 'delivery-ping',
@@ -139,6 +140,10 @@ describe('GitHub webhook', () => {
       assert.deepEqual(await first.json(), { message: 'Accepted' })
       assert.equal(second.status, 202)
       assert.deepEqual(await second.json(), { message: 'Duplicate delivery ignored' })
+      assert.equal(
+        store.deliveries.get('delivery-ping')?.payloadDigest,
+        createHash('sha256').update(body).digest('hex'),
+      )
     })
   })
 })
@@ -271,6 +276,7 @@ describe('webhook triggers a heal', () => {
 
     assert.equal(merged.runId, null)
     assert.equal(enqueued.length, 0)
+    assert.equal(store.runStatuses.get('run-1'), 'succeeded')
     assert.deepEqual(store.audits, [{ runId: 'run-1', eventType: 'pull_request.merged' }])
   })
 
@@ -285,6 +291,7 @@ describe('webhook triggers a heal', () => {
     })
 
     assert.deepEqual(store.audits, [{ runId: null, eventType: 'pull_request.merged' }])
+    assert.equal(store.runStatuses.size, 0)
     assert.equal(enqueued.length, 0)
     assert.equal(store.deliveries.has('delivery-theirs'), true)
   })
@@ -313,5 +320,21 @@ describe('webhook triggers a heal', () => {
 
     assert.equal(store.deliveries.get('delivery-install')?.repositoryId, 'repository-1234')
     assert.equal(store.deliveries.get('delivery-install')?.installationId, 'installation-99')
+  })
+
+  it('binds repositories listed on an installation payload', async () => {
+    const { store, webhooks } = service()
+
+    await webhooks.processEvent('delivery-repos', 'installation', {
+      action: 'created',
+      installation,
+      repositories: [
+        { id: 1234, full_name: 'acme/eval' },
+        { id: 5678, name: 'other', full_name: 'acme/other' },
+      ],
+    })
+
+    assert.deepEqual(store.boundRepoIds, [1234, 5678])
+    assert.equal(store.deliveries.get('delivery-repos')?.repositoryId, null)
   })
 })

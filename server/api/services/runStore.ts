@@ -39,7 +39,7 @@ function isForeignKeyViolation(error: unknown): boolean {
 
 /**
  * A user sees the runs they started and the runs the GitHub App started
- * (no creator). Webhook heals are the main Phase 1 path, and `/activity`
+ * (no creator). Webhook heals are the main path, and `/activity`
  * already shows them to every session; scoping on the creator alone hid
  * every one of them from `adamant runs`.
  */

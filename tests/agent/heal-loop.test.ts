@@ -339,7 +339,8 @@ describe('autonomous heal loop', () => {
     assert.equal(finalState.status, 'failed')
     assert.match(String(finalState.error), /without a passing sandbox result/)
     assert.equal(log.merged.length, 0)
-    assert.equal(log.calls.includes('openPr'), true, 'the PR is opened; only the merge is refused')
+    assert.equal(log.calls.includes('push'), false)
+    assert.equal(log.calls.includes('openPr'), false)
   })
 
   it('writes an audit trail and a tool log for the whole run', async () => {

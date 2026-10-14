@@ -1,7 +1,7 @@
 # Product
 
 When CI goes red, Adamant proves a fix in a sandbox, opens a PR, and **merges
-that PR**. Phase 1 is TypeScript / GitHub Actions only.
+that PR**. It targets TypeScript repositories on GitHub Actions.
 
 You use it in two places:
 
@@ -15,7 +15,7 @@ The App does **not** run inside GitHub. You install it on the repo; the
 That is the continuous check — not a poll loop. The CLI does not run the
 agent. It only reads the hosted backend.
 
-How to build it: [phase-1-tasks.md](phase-1-tasks.md). Wiring:
+How to build it: [tasks.md](tasks.md). Wiring:
 [backend-architecture.md](backend-architecture.md).
 
 ## How the GitHub App works
@@ -26,7 +26,7 @@ How to build it: [phase-1-tasks.md](phase-1-tasks.md). Wiring:
    the API on a laptop.
 3. Host API + worker + Postgres and leave them running.
 4. On **failed** `workflow_run` → create a run, heal, merge **our** PR.
-5. On **merged** `pull_request` → if it is our heal, mark the run `merged`.
+5. On **merged** `pull_request` → if it is our heal, mark the run `succeeded`.
    If it is any other merge, store the delivery so the CLI can show it.
    A merge alone does **not** start a heal.
 
@@ -66,8 +66,8 @@ PR body: **cause**, **evidence**, **fix**, **verified**, **not checked**.
 Electron Heal / inbox / OAuth, HITL before merge, agent-on-your-checkout,
 fingerprints, `.adamant.yml`, Dependabot replay.
 
-| Phase        | Ships                                                        |
-| ------------ | ------------------------------------------------------------ |
-| **0. Shell** | Done. Electron + this repo’s CI.                             |
-| **1**        | App + always-on worker, CLI monitor, one heal **and merge**. |
-| **2**        | Desktop Heal, OAuth, optional HITL.                          |
+| When  | Ships                                                       |
+| ----- | ----------------------------------------------------------- |
+| Done  | Electron shell and this repo’s CI.                          |
+| Now   | App, always-on worker, CLI monitor, one heal **and merge**. |
+| Later | Desktop Heal, OAuth, optional HITL.                         |

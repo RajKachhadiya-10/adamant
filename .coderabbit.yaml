@@ -11,7 +11,7 @@ language: en-US
 
 reviews:
   # assertive: more feedback than the chill default, including nitpicks -
-  # this is a small repo early in Phase 1 where catching more is worth the noise.
+  # this is a small repo where catching more is worth the noise.
   profile: assertive
   # Keep the GitHub review decision aligned with completed CodeRabbit reviews:
   # actionable findings request changes, and a clean current commit is approved.

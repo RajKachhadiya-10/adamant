@@ -3,10 +3,10 @@
 Time goes to installs, tests, model calls, and waiting on people — not to Hono
 vs Fastify.
 
-**Phase 1** only needs the items below. Local mode, fingerprints, desktop
+The run path needs the items below. Local mode, fingerprints, desktop
 notifications, and parallel candidate patches are later.
 
-## Phase 1 (do these)
+## Run path
 
 - Parse the CI log in code first (first error, `file:line`, test names). Do
   not send the raw dump to the model.

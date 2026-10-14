@@ -3,14 +3,14 @@
 Adamant diagnoses a red CI build, proves a fix in a sandbox, opens a pull
 request, and merges **that** PR. It does not merge anyone else's work.
 
-Phase 1 is a hosted backend (GitHub App + worker) plus a CLI that stays
+The product is a hosted backend (GitHub App + worker) plus a CLI that stays
 connected to that API, with one heal-and-merge.
-Start at [docs/phase-1-tasks.md](docs/phase-1-tasks.md).
+Start at [docs/tasks.md](docs/tasks.md).
 
 Read before larger changes:
 
 - [docs/product.md](docs/product.md): what we are building
-- [docs/phase-1-tasks.md](docs/phase-1-tasks.md): Phase 1 tasks
+- [docs/tasks.md](docs/tasks.md): task list
 - [docs/backend-architecture.md](docs/backend-architecture.md): how API, worker, and agent connect
 - [docs/database.md](docs/database.md): Postgres schema
 - [docs/tech-stack.md](docs/tech-stack.md): stack and layout
@@ -20,6 +20,8 @@ Read before larger changes:
 ## Layout
 
 ```
+cli/                @adamant/cli monitor
+contract/           @adamant/contract shared zod schemas
 electron/           desktop shell
 server/             @adamant/server   one package.json and one tsconfig.json
   api/              Hono (webhooks + CLI)
@@ -27,7 +29,6 @@ server/             @adamant/server   one package.json and one tsconfig.json
   worker/           graphile-worker
   agent/            LangGraph; must not import Hono
   sandbox/          Docker runner
-  cli/              monitor (create)
 docs/               design docs
 ```
 

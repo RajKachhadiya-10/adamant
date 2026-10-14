@@ -4,7 +4,7 @@ import { redactText } from './recorder.ts'
  * The model never sees a raw job log. Actions logs are mostly setup noise and
  * can carry masked secrets, so the log is parsed here first and only the
  * parsed shape plus a bounded excerpt reach the prompt.
- * See docs/performance.md#phase-1-do-these.
+ * See docs/performance.md#run-path.
  */
 export interface FailureContext {
   readonly firstError: string | null

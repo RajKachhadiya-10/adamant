@@ -1,9 +1,9 @@
-# Phase 1
+# Tasks
 
 One TypeScript repo. The GitHub App stays on. The CLI shows everything.
 
 1. Failed Actions → webhook → run in Postgres → LangGraph heals → merge our PR
-2. Any merged PR → webhook stored (and our run marked `merged` if it is ours)
+2. Any merged PR → webhook stored (and our run marked `succeeded` if it is ours)
 3. `adamant watch` on your laptop, connected to the hosted API
 
 It may merge **only** `adamant/{run_id}` after a passing sandbox.

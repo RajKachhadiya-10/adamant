@@ -1,11 +1,11 @@
 # Architecture
 
 Adamant repairs a repo on a working branch, proves the change in a sealed
-container, opens a pull request, and **merges that PR**. Phase 1 does not wait
+container, opens a pull request, and **merges that PR**. It does not wait
 for a human.
 
-**Phase 1** is a hosted backend plus a CLI that stays connected to it.
-Work list: [phase-1-tasks.md](phase-1-tasks.md). Tables: [database.md](database.md).
+The product is a hosted backend plus a CLI that stays connected to it.
+Work list: [tasks.md](tasks.md). Tables: [database.md](database.md).
 
 ```mermaid
 flowchart TB
@@ -35,13 +35,13 @@ flowchart TB
 The API authenticates and ACKs. It does **not** run models or Docker. Workers
 **import** `server/agent`. There is no `/agent` HTTP route.
 
-## Phase 1 vs later
+## Now vs later
 
 | Now                                                                       | Later                                                       |
 | ------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | Hosted App + worker, CLI attached to that API, sandbox, merge our heal PR | Electron Heal, OAuth, HITL, agent-on-checkout, fingerprints |
 
-Phase 1 auth: webhook HMAC. Seeded session (HTTPS) for the CLI and
+Auth today: webhook HMAC. Seeded session (HTTPS) for the CLI and
 `POST /runs`.
 
 ## Two surfaces
@@ -95,7 +95,7 @@ Electron, sessions, checkpoints, prompts, or the sandbox.
 The worker sees `{ runId }` only. It trusts a `runs` row the API already
 created.
 
-## Auth (Phase 1)
+## Auth
 
 | Route           | Auth                  | Does                                            |
 | --------------- | --------------------- | ----------------------------------------------- |
@@ -117,7 +117,7 @@ branch, or an `adamant/*` PR would merge someone else's commits with the fix
 (or heal itself in a loop). One heal per commit: each failing workflow sends
 its own delivery, and the heal already reads every failed job at that SHA.
 
-HITL (`POST /runs/:id/hitl`) is later. Phase 1 merges without it.
+HITL (`POST /runs/:id/hitl`) is later. The heal merges without it.
 
 When you add Electron login later: PKCE in main, session secret in
 `safeStorage`, Postgres stores `sessions.token_hash` only, renderer never
@@ -164,7 +164,7 @@ await compileOpenAiHealGraph({ git, sandbox, recorder }, { checkpointer }).invok
 `thread_id = run_id`. `OPENAI_API_KEY` lives in the worker environment, never
 on `runs`, in checkpoints, in the CLI, or in Electron.
 
-Phase 1 does not `interrupt()` for a human. After a passing sandbox the
+The graph does not `interrupt()` for a human. After a passing sandbox the
 graph opens the PR and merges it. HITL `interrupt()` is later.
 
 Worker death: lock TTL; resume the checkpoint. Do not start a second graph
@@ -218,12 +218,12 @@ pick the PR number; the adapter reads it from the run.
 
 Read and wait. Do not treat Actions as the sandbox.
 
-| Tool                             | Use                                     |
-| -------------------------------- | --------------------------------------- |
-| `list_workflow_runs`             | CI on the agent branch / PR             |
-| `get_workflow_run` / jobs / logs | Diagnose a red build                    |
-| `rerun_failed_jobs`              | After a patch (later; Phase 1 can skip) |
-| `workflow_dispatch`              | Only workflows tagged `adamant-allowed` |
+| Tool                             | Use                                         |
+| -------------------------------- | ------------------------------------------- |
+| `list_workflow_runs`             | CI on the agent branch / PR                 |
+| `get_workflow_run` / jobs / logs | Diagnose a red build                        |
+| `rerun_failed_jobs`              | After a patch (later; the heal can skip it) |
+| `workflow_dispatch`              | Only workflows tagged `adamant-allowed`     |
 
 ### git in the sandbox
 
@@ -236,21 +236,17 @@ Cannot `push`, `fetch`, or see `GIT_ASKPASS`.
 stateDiagram-v2
   [*] --> queued
   queued --> running
-  running --> sandboxing
-  sandboxing --> running: tests failed
-  sandboxing --> opening_pr: tests passed
-  opening_pr --> awaiting_github
-  awaiting_github --> merged
-  awaiting_github --> failed
+  running --> succeeded: sandbox passed and this run's PR merged
   running --> failed
 ```
 
-Phase 1: `sandboxing` → `opening_pr` (no `awaiting_hitl`). The worker
-calls `merge_pull_request`, then writes `merged`. `pull_request.closed`
-may confirm the same status; it must not merge a second time.
+`runs.status` is coarse: `queued`, `running`, then `succeeded` or `failed`.
+The graph checkpoint holds which node is executing. A merged `pull_request`
+webhook may confirm `succeeded` for our PR; it must not merge a second time.
 
-`awaiting_hitl` stays in the enum for later. A merge without a passing
-`sandbox_results` row is rejected.
+`awaiting_hitl` stays in the check constraint for later. A merge without a
+passing `sandbox_results` row is rejected. Push and open-PR are rejected the
+same way.
 
 ## Graph
 

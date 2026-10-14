@@ -2,7 +2,7 @@
 
 **When:** 21 Sep – 17 Oct 2026 (present 17 Oct; freeze 15 Oct; rehearse 16 Oct)
 
-**What:** [phase-1-tasks.md](phase-1-tasks.md) — hosted backend always on,
+**What:** [tasks.md](tasks.md) — hosted backend always on,
 CLI attached to it, one heal **and merge**. No Electron Heal.
 
 | Week | Dates        | Goal                                                        |

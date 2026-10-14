@@ -11,7 +11,7 @@ import {
  *
  * Order matters: the delivery row is written before the run, so a retried
  * delivery is rejected by the unique index before it can create a second run
- * (docs/backend-architecture.md#auth-phase-1). A merge only ever confirms a
+ * (docs/backend-architecture.md#auth). A merge only ever confirms a
  * run we already published; it never starts one.
  */
 export interface WebhookDependencies {
@@ -39,6 +39,8 @@ type EventPayload = {
   action?: string
   installation?: InstallationPayload
   repository?: RepositoryPayload
+  /** `installation` events list repos here, not on `repository`. */
+  repositories?: RepositoryPayload[]
   workflow_run?: {
     conclusion?: string
     head_sha?: string
@@ -74,16 +76,32 @@ function failedOnDefaultBranch(payload: EventPayload): boolean {
   )
 }
 
-const digest = (payload: unknown) =>
-  createHash('sha256')
-    .update(JSON.stringify(payload) ?? '')
-    .digest('hex')
+function payloadDigest(rawBody: string | undefined, payload: unknown): string {
+  const source = rawBody ?? JSON.stringify(payload ?? '')
+  return createHash('sha256').update(source).digest('hex')
+}
+
+function repositoryIdentity(repository: RepositoryPayload): {
+  id: number
+  owner: string
+  name: string
+  defaultBranch: string
+} | null {
+  const owner = repository.owner?.login ?? repository.full_name?.split('/')[0]
+  const name = repository.name ?? repository.full_name?.split('/')[1]
+  if (!repository.id || !owner || !name) return null
+  return {
+    id: repository.id,
+    owner,
+    name,
+    defaultBranch: repository.default_branch ?? 'main',
+  }
+}
 
 export function createWebhookService(deps: WebhookDependencies) {
   /** Both rows are keyed on GitHub's numeric ids, so this is safe to repeat. */
   async function bind(store: WebhookStore, payload: EventPayload) {
     const installationId = payload.installation?.id
-    const repository = payload.repository
     if (!installationId) return { installationRowId: null, repositoryRowId: null }
 
     const installationRowId = await store.upsertInstallation({
@@ -92,19 +110,33 @@ export function createWebhookService(deps: WebhookDependencies) {
       accountType: payload.installation?.account?.type ?? 'Organization',
     })
 
-    const owner = repository?.owner?.login ?? repository?.full_name?.split('/')[0]
-    if (!repository?.id || !repository.name || !owner) {
-      return { installationRowId, repositoryRowId: null }
+    const listed = [
+      ...(payload.repository ? [payload.repository] : []),
+      ...(payload.repositories ?? []),
+    ]
+    const seen = new Set<number>()
+    let primaryRowId: string | null = null
+    let onlyRowId: string | null = null
+    let count = 0
+
+    for (const repository of listed) {
+      const identity = repositoryIdentity(repository)
+      if (!identity || seen.has(identity.id)) continue
+      seen.add(identity.id)
+      const rowId = await store.upsertRepository({
+        installationId: installationRowId,
+        githubRepoId: identity.id,
+        owner: identity.owner,
+        name: identity.name,
+        defaultBranch: identity.defaultBranch,
+      })
+      count += 1
+      onlyRowId = rowId
+      if (payload.repository?.id === identity.id) primaryRowId = rowId
     }
 
-    const repositoryRowId = await store.upsertRepository({
-      installationId: installationRowId,
-      githubRepoId: repository.id,
-      owner,
-      name: repository.name,
-      defaultBranch: repository.default_branch ?? 'main',
-    })
-
+    // An installation-wide event names many repos. Don't pin the delivery to one of them.
+    const repositoryRowId = primaryRowId ?? (count === 1 ? onlyRowId : null)
     return { installationRowId, repositoryRowId }
   }
 
@@ -152,6 +184,7 @@ export function createWebhookService(deps: WebhookDependencies) {
     // A merge confirms a run we opened. It never starts a heal, and it never
     // merges anything a second time.
     const runId = await store.findRunByPullRequest(repositoryRowId, prNumber)
+    if (runId) await store.markRunSucceeded(runId)
     await store.recordAudit(runId, 'pull_request.merged', {
       deliveryId,
       prNumber,
@@ -183,6 +216,7 @@ export function createWebhookService(deps: WebhookDependencies) {
       deliveryId: string,
       event: string,
       rawPayload: unknown,
+      rawBody?: string,
     ): Promise<WebhookResult> {
       return deps.store.transaction(async (store) => {
         const payload = (rawPayload ?? {}) as EventPayload
@@ -193,7 +227,7 @@ export function createWebhookService(deps: WebhookDependencies) {
           eventType: event,
           installationId: installationRowId,
           repositoryId: repositoryRowId,
-          payloadDigest: digest(rawPayload),
+          payloadDigest: payloadDigest(rawBody, rawPayload),
         })
 
         if (!stored) {

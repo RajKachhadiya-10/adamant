@@ -224,35 +224,41 @@ export const createNodes = (deps: AgentDependencies) => {
         throw new Error('Candidate missing before publish phase')
       }
 
-      const git = gateway(state)
-      const branch = git.agentBranch
+      try {
+        const git = gateway(state)
+        const branch = git.agentBranch
 
-      // One push, after the pass. See docs/performance.md.
-      await git.commit(buildCommitMessage(state.failure, state.runId))
-      await git.push(branch)
+        // One push, after the pass. See docs/performance.md.
+        await git.commit(buildCommitMessage(state.failure, state.runId))
+        await git.push(branch)
 
-      const pr = await git.openPr(
-        branch,
-        state.repository.defaultBranch,
-        buildPrTitle(state.failure),
-        buildPrBody({
-          runId: state.runId,
-          failure: state.failure,
-          diagnostics: state.diagnostics ?? '',
-          plan: state.plan ?? '',
-          commands: state.sandboxResult.commands,
-          attemptNumber: state.attemptNumber,
-        }),
-      )
+        const pr = await git.openPr(
+          branch,
+          state.repository.defaultBranch,
+          buildPrTitle(state.failure),
+          buildPrBody({
+            runId: state.runId,
+            failure: state.failure,
+            diagnostics: state.diagnostics ?? '',
+            plan: state.plan ?? '',
+            commands: state.sandboxResult.commands,
+            attemptNumber: state.attemptNumber,
+          }),
+        )
 
-      await deps.recorder.prPublication({
-        prNumber: pr.number,
-        prUrl: pr.url,
-        baseSha: state.baseSha,
-        candidateHash: state.candidateHash,
-      })
+        await deps.recorder.prPublication({
+          prNumber: pr.number,
+          prUrl: pr.url,
+          baseSha: state.baseSha,
+          candidateHash: state.candidateHash,
+        })
 
-      return { prNumber: pr.number, prUrl: pr.url, status: 'publishing' }
+        return { prNumber: pr.number, prUrl: pr.url, status: 'publishing' }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        await deps.recorder.audit('run.publish_failed', { error: message })
+        return { error: message, status: 'failed' }
+      }
     },
 
     mergePrNode: async (state: AgentState): Promise<Partial<AgentState>> => {

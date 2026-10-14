@@ -1,6 +1,6 @@
 # Database
 
-Phase 1 piece 1. Tasks 1.x in [phase-1-tasks.md](phase-1-tasks.md). Why the
+Schema for the hosted backend. Tasks in [tasks.md](tasks.md). Why the
 tables exist: [backend-architecture.md](backend-architecture.md).
 
 **Done when:** empty DB migrates; you can insert a `queued` run. Do not invent
@@ -31,7 +31,7 @@ Run state lives in `runs`. Queue state lives in graphile-worker's own schema. Do
   secrets. Mint installation tokens per call; store only `sessions.token_hash`, never the
   bearer or a GitHub user token.
 - Failure fingerprints, monthly budgets, `.adamant.yml`, or review-memory
-  tables. Those are later, not Phase 1.
+  tables. Those are later.
 - Soft-delete. We do not delete runs.
 - A second database for the agent. API, worker, and checkpointer share one `DATABASE_URL`.
 
@@ -139,30 +139,27 @@ Use Drizzle `pgEnum` so the database rejects illegal values. R10 copies these st
 
 From the [run state machine](backend-architecture.md#run-state):
 
-| Value             | Who writes it                  | Meaning                                       |
-| ----------------- | ------------------------------ | --------------------------------------------- |
-| `queued`          | API on `POST /runs` or webhook | Job not yet claimed                           |
-| `running`         | Graph worker                   | Retrieve / triage / diagnose / plan / patch   |
-| `sandboxing`      | Graph worker                   | Waiting on a `sandbox_exec` job               |
-| `awaiting_hitl`   | unused in Phase 1              | Later: wait for a human before merge          |
-| `opening_pr`      | Graph worker                   | Sandbox passed; creating the PR               |
-| `awaiting_github` | Graph worker                   | PR open; merge in flight                      |
-| `merged`          | Graph worker (merge API)       | This run's PR was merged. Webhook may confirm |
-| `failed`          | Worker or API                  | Terminal error (403, attempts exhausted, …)   |
-| `aborted`         | API                            | Later: HITL abort                             |
+| Value               | Who writes it                  | Meaning                                             |
+| ------------------- | ------------------------------ | --------------------------------------------------- |
+| `queued`            | API on webhook or `POST /runs` | Job not yet claimed                                 |
+| `running`           | Worker                         | Heal graph is in progress                           |
+| `report_only`       | unused                         | Reserved                                            |
+| `awaiting_hitl`     | unused                         | Later: wait for a human before merge                |
+| `changes_requested` | unused                         | Later: a human asked for another attempt            |
+| `publishing`        | unused on this column          | The graph uses this in checkpoint state, not here   |
+| `succeeded`         | Worker, or the merge webhook   | This run's PR was merged                            |
+| `aborted`           | unused                         | Later: stopped before merge                         |
+| `failed`            | Worker                         | Terminal error (attempts exhausted, tool denied, …) |
 
-Legal transitions (enforce in application code, not CHECK constraints beyond the enum):
+The column is `text` plus a CHECK constraint, not a Postgres enum. Legal
+writes today:
 
 ```
-queued → running
-running → sandboxing | failed
-sandboxing → running | opening_pr | failed
-opening_pr → awaiting_github | failed
-awaiting_github → merged | failed
+queued → running → succeeded | failed
 ```
 
-Phase 1 never enters `awaiting_hitl`. Keep the enum value so later HITL
-does not need a migration.
+The heal does not enter `awaiting_hitl`. The value stays in the check so a
+later human approval does not need a migration.
 
 ### `hitl_decision`
 
@@ -269,7 +266,7 @@ GitHub App installation. Tokens are minted per call and **must not** appear here
 
 ### `repo_bindings`
 
-Phase 1: bind the eval repo to the GitHub App installation. Webhook and
+Bind the eval repo to the GitHub App installation. Webhook and
 `POST /runs` both need this row. Collaborator checks wait for OAuth.
 
 | Column            | Type        | Constraints                                |
@@ -287,7 +284,7 @@ Index: `repo_bindings_installation_id_idx` on `installation_id`.
 | Column              | Type         | Constraints                                                     |
 | ------------------- | ------------ | --------------------------------------------------------------- |
 | `id`                | uuid         | PK                                                              |
-| `actor_user_id`     | uuid         | not null, FK → `users.id` restrict (seed user in Phase 1)       |
+| `actor_user_id`     | uuid         | not null, FK → `users.id` restrict (seed user until OAuth)      |
 | `repo_binding_id`   | uuid         | not null, FK → `repo_bindings.id` restrict                      |
 | `status`            | `run_status` | not null, default `queued`                                      |
 | `version`           | integer      | not null, default `0`                                           |
@@ -301,7 +298,7 @@ Index: `repo_bindings_installation_id_idx` on `installation_id`.
 
 `idempotency_key` is `workflow_run:{head_sha}` or the client `Idempotency-Key`.
 
-`version` is for later HITL (`UPDATE … WHERE version = $2` → 409). Phase 1
+`version` is for later HITL (`UPDATE … WHERE version = $2` → 409). The heal
 does not need it to merge.
 
 Merge without a passing `sandbox_results` row is rejected in the worker, not

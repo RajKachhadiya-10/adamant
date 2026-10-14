@@ -1,4 +1,4 @@
-# Adamant
+<h1 align="center">Adamant</h1>
 
 **A build goes red. Adamant works out why, proves a fix in a sealed container, opens a pull
 request, and merges _that_ pull request.** It merges nothing else.
@@ -10,7 +10,7 @@ request, and merges _that_ pull request.** It merges nothing else.
 Adamant is a GitHub App plus an always-on backend. GitHub pushes an event the moment a workflow
 fails — there is no poll loop — and a worker runs a LangGraph agent that diagnoses the failure,
 patches the code, and ships only once the repo's own tests pass in a throwaway Docker container.
-Phase 1 targets TypeScript repositories on GitHub Actions.
+It targets TypeScript repositories on GitHub Actions.
 
 Written for the IT-314 software engineering course. [docs/product.md](docs/product.md) is the
 full picture.
@@ -39,43 +39,26 @@ flowchart LR
    off, and writes `pass` or `fail`. A fail goes back to diagnose, up to a capped number of
    attempts.
 6. On a pass — and only then — the agent pushes `refs/heads/adamant/{run_id}`, opens a PR stating
-   cause, evidence, fix, what was verified and what was not, and merges that PR.
+   cause, evidence, fix, what was verified and what was not, and merges that PR. A merge webhook
+   for that PR sets the run to `succeeded`. It does not start another heal.
 
 Every tool call the agent made is on `tool_invocations` and `audit_events`, keyed by run.
 
-## Why “Adamant”?
-
-The name **Adamant** is inspired by Wolverine’s adamantium claws and skeleton. Adamantium makes
-him nearly indestructible: it gives him extraordinary strength, turns his claws into unstoppable
-weapons, and makes him feel almost invincible. A flawless upgrade—apart from the minor
-inconvenience that it slowly poisons him and, in _Logan_, contributes to his death.
-
-AI carries a similar contradiction. It can make us feel superhuman—helping us write faster, solve
-harder problems, build ambitious ideas, and confidently generate 500 lines of code we only
-_mostly_ understand. But when we depend on it for every answer, it can quietly weaken the abilities
-it is supposed to enhance: independent thought, curiosity, problem-solving, and creativity.
-
-That is why we chose **Adamant**. It represents immense power, while reminding us that every
-powerful tool has a cost when used without restraint—especially when “just one quick prompt”
-somehow becomes our entire thinking process.
-
-**Use the power. Don’t let the power use you.**
-
 ## Status
 
-Phase 1 is in progress ([docs/phase-1-tasks.md](docs/phase-1-tasks.md)).
+The heal loop runs on the hosted API and worker ([docs/tasks.md](docs/tasks.md)).
 
-| Piece                                                                  | State                                     |
-| ---------------------------------------------------------------------- | ----------------------------------------- |
-| Webhooks → `runs` in Postgres, dedupe by delivery id                   | Implemented                               |
-| Worker + heal graph (triage → diagnose → patch → sandbox → PR → merge) | Implemented                               |
-| Docker sandbox runner                                                  | Implemented                               |
-| `POST /runs`, `GET /runs`, `GET /runs/:id`                             | Implemented                               |
-| GitHub and Google OAuth, sessions, `GET /auth/me`                      | Implemented in the API; no Electron login |
-| `GET /activity` SSE feed                                               | Implemented                               |
-| `@adamant/cli` (`status`, `runs`, `run <id>`, `watch`)                 | Implemented                               |
-| Electron app                                                           | Shell only; healing does not run from it  |
-| Human-in-the-loop approval before merge                                | Phase 2                                   |
+| Piece                                                                  | State                                                 |
+| ---------------------------------------------------------------------- | ----------------------------------------------------- |
+| Webhooks → `runs` in Postgres, dedupe by delivery id                   | Implemented                                           |
+| Worker + heal graph (triage → diagnose → patch → sandbox → PR → merge) | Implemented                                           |
+| Docker sandbox runner                                                  | Implemented                                           |
+| `POST /runs`, `GET /runs`, `GET /runs/:id`                             | Implemented                                           |
+| GitHub and Google OAuth, sessions, `GET /auth/me`                      | Implemented in the API; the Electron app has no login |
+| `GET /activity` SSE feed                                               | Implemented                                           |
+| `@adamant/cli` (`status`, `runs`, `run <id>`, `watch`, `trigger`)      | Implemented                                           |
+| Electron app                                                           | Shell only; healing does not run from it              |
+| Human-in-the-loop approval before merge                                | Later                                                 |
 
 ## Quick start
 
@@ -216,6 +199,7 @@ after a dropped connection.
 
 ```
 cli/               @adamant/cli OpenTUI monitor and hosted API client
+contract/          @adamant/contract: zod schemas shared by API, worker, and CLI
 electron/          desktop shell
   main/            Electron main process: window, IPC handlers
   preload/         the only bridge into the renderer (CommonJS)
@@ -224,7 +208,7 @@ electron/          desktop shell
 server/            @adamant/server: one package.json, one tsconfig.json
   api/             Hono: webhooks, auth, runs, activity
   db/              Drizzle schema and migrations; drizzle.config.ts
-  worker/          graphile-worker: graph_step, sandbox_exec
+  worker/          graphile-worker: graph_step
   agent/           LangGraph heal graph and tools; no HTTP
   sandbox/         Docker runner
 tests/             node:test suites, one folder per area
@@ -245,7 +229,8 @@ These are invariants, not defaults. [AGENTS.md](AGENTS.md) is the version review
 - Pushes exactly one ref, `refs/heads/adamant/{run_id}`. No force-push, no push to a default
   branch. The adapter sets the refspec; the model does not.
 - May merge only the PR that run opened, and only after reading a passing `sandbox_results` row
-  back from the table. Any other PR number is denied and the run fails.
+  back from the table. Push and open-PR use that same row. Any other PR number, or a head that
+  is not `adamant/{run_id}`, is denied and the run fails.
 - Calls allowlisted tools only, each logged to `tool_invocations` / `audit_events` with its
   `run_id`. Unknown calls fail closed.
 - Never holds a long-lived GitHub token: installation tokens are minted per call and kept out of
@@ -284,7 +269,7 @@ variables to sign and notarise.
 | Doc                                                            | Covers                              |
 | -------------------------------------------------------------- | ----------------------------------- |
 | [docs/product.md](docs/product.md)                             | What we're building, and for whom   |
-| [docs/phase-1-tasks.md](docs/phase-1-tasks.md)                 | Phase 1: app, CLI, heal + merge     |
+| [docs/tasks.md](docs/tasks.md)                                 | Task list: app, CLI, heal + merge   |
 | [docs/backend-architecture.md](docs/backend-architecture.md)   | API, worker, agent, GitHub, sandbox |
 | [docs/database.md](docs/database.md)                           | Postgres schema                     |
 | [docs/db-and-worker-setup.md](docs/db-and-worker-setup.md)     | Running the backend locally         |
@@ -294,6 +279,24 @@ variables to sign and notarise.
 | [docs/glossary.md](docs/glossary.md)                           | Words the other docs use            |
 | [CONTRIBUTING.md](CONTRIBUTING.md)                             | Branches, commits, review, merge    |
 | [AGENTS.md](AGENTS.md)                                         | Rules for agents and reviewers      |
+
+## Why “Adamant”?
+
+The name **Adamant** is inspired by Wolverine’s adamantium claws and skeleton. Adamantium makes
+him nearly indestructible: it gives him extraordinary strength, turns his claws into unstoppable
+weapons, and makes him feel almost invincible. A flawless upgrade—apart from the minor
+inconvenience that it slowly poisons him and, in _Logan_, contributes to his death.
+
+AI carries a similar contradiction. It can make us feel superhuman—helping us write faster, solve
+harder problems, build ambitious ideas, and confidently generate 500 lines of code we only
+_mostly_ understand. But when we depend on it for every answer, it can quietly weaken the abilities
+it is supposed to enhance: independent thought, curiosity, problem-solving, and creativity.
+
+That is why we chose **Adamant**. It represents immense power, while reminding us that every
+powerful tool has a cost when used without restraint—especially when “just one quick prompt”
+somehow becomes our entire thinking process.
+
+**Use the power. Don’t let the power use you.**
 
 ## Contributing
 

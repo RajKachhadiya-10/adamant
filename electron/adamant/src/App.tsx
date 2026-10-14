@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { AppInfo } from '@adamant/shared'
+import { type AppInfo } from '@adamant/shared'
 import { loadAppInfo } from './bridge'
 import { TitleBar } from './components/TitleBar'
 

@@ -66,18 +66,20 @@ export class SecureGitClient {
   }
 
   async push(branch: string): Promise<void> {
-    await this.guarded('git_push', { branch }, () => {
+    await this.guarded('git_push', { branch }, async () => {
       this.assertAgentBranch(branch, `Unauthorized push attempt to branch ${branch}.`)
+      await this.assertSandboxPassed('push')
       return this.git.push(branch)
     })
   }
 
   async openPr(branch: string, base: string, title: string, body: string): Promise<PullRequestRef> {
-    return this.guarded('open_pull_request', { branch, base, title }, () => {
+    return this.guarded('open_pull_request', { branch, base, title }, async () => {
       this.assertAgentBranch(branch, `Unauthorized PR attempt from branch ${branch}.`)
       if (base === branch) {
         throw new ToolDeniedError('A pull request cannot target its own head branch.')
       }
+      await this.assertSandboxPassed('open a pull request')
       return this.git.openPr(branch, base, title, body)
     })
   }
@@ -96,10 +98,7 @@ export class SecureGitClient {
         )
       }
 
-      const verdict = await this.recorder.latestSandboxVerdict()
-      if (verdict !== 'pass') {
-        throw new ToolDeniedError(`Cannot merge PR ${prNumber} without a passing sandbox result.`)
-      }
+      await this.assertSandboxPassed(`merge PR ${prNumber}`)
 
       // A run may only merge a PR it is recorded as having opened. Treating a
       // missing row as permission would let a merge through for a PR this run
@@ -143,6 +142,14 @@ export class SecureGitClient {
       throw error
     }
     throw new Error(`Call ${tool} through its typed method on SecureGitClient.`)
+  }
+
+  /** Read back from `sandbox_results`, not from graph state. */
+  private async assertSandboxPassed(action: string): Promise<void> {
+    const verdict = await this.recorder.latestSandboxVerdict()
+    if (verdict !== 'pass') {
+      throw new ToolDeniedError(`Cannot ${action} without a passing sandbox result.`)
+    }
   }
 
   private assertAgentBranch(branch: string, message: string): void {
