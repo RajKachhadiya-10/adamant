@@ -96,14 +96,22 @@ FFI. It is only a session-authenticated monitor and trigger client: it never rec
 GitHub credentials, and it cannot merge a pull request.
 
 ```bash
-export ADAMANT_API_URL=https://adamant.example
 export ADAMANT_SESSION=your-session-token
 pnpm adamant
 ```
 
-`ADAMANT_API_URL` must be an HTTPS origin, except explicit `localhost` development URLs. Start
+Until the API is hosted, the CLI defaults to `http://localhost:8787`. Set `ADAMANT_API_URL` to point
+it elsewhere; it must be an HTTPS origin, except `localhost` development URLs. Start
 with `pnpm adamant status`, `pnpm adamant runs`, `pnpm adamant run <id>`, or `pnpm adamant watch`
 to execute the same command in the interactive interface.
+
+To run it as `adamant` from any directory, link it once after `pnpm install`. The link points at
+this checkout, so source changes apply without a rebuild.
+
+```bash
+cd cli && npm link
+adamant status
+```
 
 ### Desktop shell
 

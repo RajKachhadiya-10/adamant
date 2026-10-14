@@ -76,9 +76,9 @@ the API is not hosted yet.
 | `adamant run <id>` | `GET /runs/:id` (status + `audit_events`) |
 | `adamant watch`    | `GET /activity` SSE                       |
 
-No OpenAI key, no GitHub token, no merge from the CLI. The CLI must not
-default to `localhost` except as an explicit override for backend
-developers.
+No OpenAI key, no GitHub token, no merge from the CLI. Until the API is
+hosted, the CLI defaults to `http://localhost:8787`; switch the default to
+the hosted origin once it exists.
 
 ## Identity
 

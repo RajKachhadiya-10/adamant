@@ -1,5 +1,3 @@
-#!/usr/bin/env -S node --experimental-ffi --import tsx
-
 import { createCliRenderer } from '@opentui/core'
 import { createRoot } from '@opentui/react'
 import { CliApp } from './app.tsx'
