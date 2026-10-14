@@ -6,8 +6,16 @@ import { createAuthMiddleware } from './middleware/auth.ts'
 import { createActivityRoute } from './routes/activity.ts'
 import { createAuthRoute, type OAuthConfig } from './routes/auth.ts'
 import { createRunsRoute } from './routes/runs.ts'
-import { createActivityService, type ActivityService } from './services/activityService.ts'
-import { createPostgresRunApiStore, type RunApiStore } from './services/runStore.ts'
+import {
+  createActivityService,
+  listenForActivity,
+  type ActivityService,
+} from './services/activityService.ts'
+import {
+  createMemoryRunApiStore,
+  createPostgresRunApiStore,
+  type RunApiStore,
+} from './services/runStore.ts'
 import { createWebhookService } from './services/webhookService.ts'
 import { createPostgresWebhookStore } from './services/webhookStore.ts'
 import { createGithubWebhookRoute } from './webhooks/github.ts'
@@ -20,7 +28,8 @@ import { createGithubWebhookRoute } from './webhooks/github.ts'
  * With a database, /runs is the Postgres-backed router and the in-memory
  * schema CRUD is not mounted: its rows never reach Postgres, its maps grow
  * without bound, and its POST /audit-events would publish forged events to
- * every `adamant watch`. Without a database the CRUD is the local stand-in.
+ * every `adamant watch`. Without a database the CRUD is the local stand-in,
+ * except /runs, which keeps the CLI's contract through an in-memory store.
  */
 export type ServerOptions = {
   database?: Db
@@ -58,23 +67,25 @@ export function createServerApp(runStore?: RunApiStore, options: ServerOptions =
   const authMiddleware = createAuthMiddleware({
     ...(database ? { database } : {}),
   })
-  const resolvedRunStore = runStore ?? (database ? createPostgresRunApiStore(database) : undefined)
   const resolvedActivityService =
     options.activityService ??
     createActivityService({
-      ...(database ? { database } : {}),
+      ...(database ? { database, changes: listenForActivity(database.$client) } : {}),
     })
+  const resolvedRunStore =
+    runStore ??
+    (database
+      ? createPostgresRunApiStore(database)
+      : createMemoryRunApiStore({ activity: resolvedActivityService }))
 
   for (const name of [...resourceNames, 'activity']) {
     app.use(`/${name}`, authMiddleware)
     app.use(`/${name}/*`, authMiddleware)
   }
 
-  if (resolvedRunStore) {
-    // The loop above already authenticated /runs; a second pass would repeat
-    // the session lookup on every request.
-    app.route('/runs', createRunsRoute(resolvedRunStore, alreadyAuthenticated))
-  }
+  // The loop above already authenticated /runs; a second pass would repeat
+  // the session lookup on every request.
+  app.route('/runs', createRunsRoute(resolvedRunStore, alreadyAuthenticated))
 
   if (database) {
     app.route(
@@ -85,7 +96,7 @@ export function createServerApp(runStore?: RunApiStore, options: ServerOptions =
     )
     app.get('/health', (c) => c.json({ status: 'ok' }))
   } else {
-    createApp(undefined, app, resolvedActivityService)
+    createApp(undefined, app, resolvedActivityService, ['runs'])
   }
 
   // One pool per process: the webhook store reuses the server's database.

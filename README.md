@@ -95,15 +95,21 @@ The full-screen CLI requires Node.js 26.4+ because its OpenTUI renderer uses Nod
 FFI. It is only a session-authenticated monitor and trigger client: it never receives OpenAI or
 GitHub credentials, and it cannot merge a pull request.
 
+It needs a session. Against an API with a database, mint one; the token is printed once and only
+its hash is stored. It lasts 30 days, and `POST /auth/logout` with it revokes it. Under Compose,
+run `docker compose exec -T api node --experimental-strip-types api/create-session.ts` instead.
+Against an API without a database, the session is its `ADAMANT_SESSION_SECRET`.
+
 ```bash
-export ADAMANT_SESSION=your-session-token
+export ADAMANT_SESSION=$(pnpm --silent --filter @adamant/server session:create)
 pnpm adamant
 ```
 
 Until the API is hosted, the CLI defaults to `http://localhost:8787`. Set `ADAMANT_API_URL` to point
 it elsewhere; it must be an HTTPS origin, except `localhost` development URLs. Start
 with `pnpm adamant status`, `pnpm adamant runs`, `pnpm adamant run <id>`, or `pnpm adamant watch`
-to execute the same command in the interactive interface.
+to execute the same command in the interactive interface. `status` checks the session as well as
+the API, so it is the first thing to run when other commands fail.
 
 To run it as `adamant` from any directory, link it once after `pnpm install`. The link points at
 this checkout, so source changes apply without a rebuild.
@@ -166,10 +172,15 @@ needs `pnpm --filter @adamant/server dev` with them in the environment.
 | `GET /activity`                      | session               | Server-Sent Event feed for `adamant watch`        |
 
 A session arrives as the `adamant_session` cookie, an `Authorization: Bearer` header, or an
-`ADAMANT_SESSION` header, never in the URL (query strings end up in access logs). `/auth/*` and the
-Postgres-backed runs router mount only when `DATABASE_URL` is set; without it the API falls back
-to the seeded session and an in-memory store. The remaining schema tables are also exposed as
-CRUD routes behind the same auth, for development.
+`ADAMANT_SESSION` header, never in the URL (query strings end up in access logs). The CLI sends
+`Authorization: Bearer`, because proxies such as nginx drop header names with underscores.
+`/auth/*` and the Postgres-backed runs router mount only when `DATABASE_URL` is set; without it the
+API falls back to the seeded session, and `/runs` keeps the same contract over an in-memory store.
+The remaining schema tables are also exposed as CRUD routes behind the same auth, for development.
+
+`/activity` LISTENs on Postgres (`adamant_activity`, notified by insert triggers on `audit_events`
+and `webhook_deliveries`), so a new row reaches `adamant watch` in milliseconds. A one-second poll
+stays as the fallback if that connection drops.
 
 ## Commands
 
@@ -196,12 +207,16 @@ Backend scripts run through `pnpm --filter @adamant/server <script>`:
 | `db:generate`                | Generate a migration from the Drizzle schema |
 | `db:migrate`                 | Apply migrations                             |
 | `db:studio`                  | Drizzle Studio against `DATABASE_URL`        |
+| `session:create [username]`  | Print a new CLI session (default user `cli`) |
 
 Inside the CLI, use `/help`, `/status`, `/runs`, `/run <id>`, `/watch`, or
 `/trigger <repositoryId> <fullSha>`. `/clear` and `/quit` manage the local interface. Tab
-completes a command; Up/Down or `j`/`k` navigate suggestions and results; Esc closes transient
-input; Ctrl+L clears output; Ctrl+C exits. `/watch` resumes its SSE stream with `Last-Event-ID`
-after a dropped connection.
+completes a command and Enter runs the highlighted suggestion, so `/st` Enter runs `/status`.
+Up/Down move through suggestions; with an empty prompt, Up/Down or `j`/`k` select a row from
+`/runs` and Enter opens it. PgUp/PgDn scroll the output; Esc clears the prompt; Ctrl+L clears
+output; Ctrl+C exits. `/watch` resumes its SSE stream with `Last-Event-ID` after a dropped
+connection, reconnects a stream that has been silent for 45 s, and stops with a message when the
+session is refused.
 
 ## Layout
 

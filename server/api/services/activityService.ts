@@ -1,4 +1,5 @@
 import { desc, gt } from 'drizzle-orm'
+import { type Notification, type Pool, type PoolClient } from 'pg'
 import type { Db } from '../../db/client.ts'
 import { auditEvents, webhookDeliveries } from '../../db/client.ts'
 
@@ -18,8 +19,16 @@ export interface ActivityService {
   subscriberCount(): number
 }
 
+/**
+ * Calls `onChange` when another writer may have added activity, and returns a
+ * function that stops listening. Called only while someone is connected.
+ */
+export type ActivityChangeSource = (onChange: () => void) => () => void
+
 export type ActivityServiceOptions = {
   database?: Db
+  /** Wakes the tail as soon as a row commits, instead of at the next poll. */
+  changes?: ActivityChangeSource
   memoryStores?: Record<string, Map<string, Record<string, unknown>>>
   maxInMemoryEvents?: number
   /** Newest rows replayed per table on connect. */
@@ -65,7 +74,8 @@ function deliveryEvent(row: {
   }
 }
 
-function auditEvent(row: {
+/** The feed's shape for an `audit_events` row, wherever the row was written. */
+export function auditEvent(row: {
   id: string
   runId: string | null
   eventType: string
@@ -101,7 +111,16 @@ function byTimeThenId(a: ActivityEvent, b: ActivityEvent): number {
  * oldest first. Both reads walk a time index; neither scans its table.
  */
 async function loadRecent(db: Db, limit: number, since?: Date): Promise<ActivityEvent[]> {
-  const deliveries = await db
+  // Independent reads; together they are the time to a client's first event.
+  const [deliveries, audits] = await Promise.all([
+    loadDeliveries(db, limit, since),
+    loadAudits(db, limit, since),
+  ])
+  return [...deliveries.map(deliveryEvent), ...audits.map(auditEvent)].sort(byTimeThenId)
+}
+
+function loadDeliveries(db: Db, limit: number, since?: Date) {
+  return db
     .select({
       id: webhookDeliveries.id,
       githubDeliveryId: webhookDeliveries.githubDeliveryId,
@@ -115,8 +134,10 @@ async function loadRecent(db: Db, limit: number, since?: Date): Promise<Activity
     .where(since ? gt(webhookDeliveries.receivedAt, since) : undefined)
     .orderBy(desc(webhookDeliveries.receivedAt))
     .limit(limit)
+}
 
-  const audits = await db
+function loadAudits(db: Db, limit: number, since?: Date) {
+  return db
     .select({
       id: auditEvents.id,
       runId: auditEvents.runId,
@@ -129,8 +150,6 @@ async function loadRecent(db: Db, limit: number, since?: Date): Promise<Activity
     .where(since ? gt(auditEvents.createdAt, since) : undefined)
     .orderBy(desc(auditEvents.createdAt))
     .limit(limit)
-
-  return [...deliveries.map(deliveryEvent), ...audits.map(auditEvent)].sort(byTimeThenId)
 }
 
 /**
@@ -153,6 +172,9 @@ export function createActivityService(options: ActivityServiceOptions = {}): Act
   // Database tail: runs only while someone is connected.
   let tailing = false
   let polling = false
+  // A change arrived while a poll was already reading; read again right after.
+  let changedDuringPoll = false
+  let stopListening: (() => void) | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   let watermark = 0
   const tailed = new Map<string, number>()
@@ -262,14 +284,28 @@ export function createActivityService(options: ActivityServiceOptions = {}): Act
     tailing = true
     watermark = Date.now()
     tailed.clear()
+    stopListening = options.changes?.(onChange)
     // A poll still in flight reschedules itself when it sees `tailing`.
     if (!polling) scheduleTail()
   }
 
   function stopTail() {
     tailing = false
+    stopListening?.()
+    stopListening = undefined
     if (timer) clearTimeout(timer)
     timer = undefined
+  }
+
+  /** Reads now rather than at the next poll; a burst of changes costs one or two reads. */
+  function onChange() {
+    if (!tailing) return
+    if (polling) {
+      changedDuringPoll = true
+      return
+    }
+    if (timer) clearTimeout(timer)
+    void tailOnce()
   }
 
   function scheduleTail() {
@@ -298,7 +334,112 @@ export function createActivityService(options: ActivityServiceOptions = {}): Act
       console.error('activity tail failed', error)
     } finally {
       polling = false
-      if (tailing) scheduleTail()
+      if (tailing && changedDuringPoll) {
+        changedDuringPoll = false
+        void tailOnce()
+      } else if (tailing) {
+        scheduleTail()
+      }
+    }
+  }
+}
+
+/** Channel the activity triggers in migration 0005 notify on every insert. */
+export const ACTIVITY_CHANNEL = 'adamant_activity'
+const RELISTEN_DELAY_MS = 5_000
+
+/**
+ * LISTENs on a connection of its own while anyone is watching. The worker and
+ * the webhook handler write activity in other transactions, often in another
+ * process, so without this a new row waited for the next poll: about a second
+ * on every live event. The poll stays as the fallback, so a dropped LISTEN
+ * connection makes events late, never lost.
+ */
+export function listenForActivity(
+  pool: Pool,
+  options: { retryMs?: number } = {},
+): ActivityChangeSource {
+  const retryMs = options.retryMs ?? RELISTEN_DELAY_MS
+  return (onChange) => {
+    let stopped = false
+    let retry: ReturnType<typeof setTimeout> | undefined
+    let release: (() => void) | undefined
+
+    const reconnectLater = () => {
+      if (stopped || retry) return
+      retry = setTimeout(() => void connect(), retryMs)
+      retry.unref()
+    }
+
+    async function connect() {
+      retry = undefined
+      let connection: PoolClient
+      try {
+        connection = await pool.connect()
+      } catch (error) {
+        console.error('activity LISTEN failed; polling until it reconnects', error)
+        return reconnectLater()
+      }
+
+      let released = false
+      const onNotification = (message: Notification) => {
+        if (message.channel === ACTIVITY_CHANNEL) onChange()
+      }
+      const onLost = () => {
+        if (released) return
+        released = true
+        if (release === stopListening) release = undefined
+        // A broken connection is destroyed, never handed back to the pool.
+        connection.release(true)
+        reconnectLater()
+      }
+      // Returned to the pool for reuse: a fresh connection on every `watch`
+      // cost a full Postgres handshake. Our listeners come off first, or each
+      // reuse would add another set to a shared client.
+      const stopListening = () => {
+        if (released) return
+        released = true
+        if (release === stopListening) release = undefined
+        connection.off('notification', onNotification)
+        // `onLost` stays on until the connection is handed back: an 'error'
+        // nobody listens for would crash the process.
+        const detach = () => {
+          connection.off('error', onLost)
+          connection.off('end', onLost)
+        }
+        connection.query(`UNLISTEN ${ACTIVITY_CHANNEL}`).then(
+          () => {
+            detach()
+            connection.release()
+          },
+          (error: Error) => {
+            detach()
+            connection.release(error)
+          },
+        )
+      }
+      connection.on('notification', onNotification)
+      connection.on('error', onLost)
+      connection.on('end', onLost)
+      if (stopped) return stopListening()
+      release = stopListening
+
+      try {
+        await connection.query(`LISTEN ${ACTIVITY_CHANNEL}`)
+      } catch (error) {
+        if (!released) console.error('activity LISTEN failed; polling until it reconnects', error)
+        return onLost()
+      }
+      // A row committed before LISTEN took effect would otherwise wait for the poll.
+      if (!released) onChange()
+    }
+
+    void connect()
+    return () => {
+      stopped = true
+      if (retry) clearTimeout(retry)
+      retry = undefined
+      release?.()
     }
   }
 }

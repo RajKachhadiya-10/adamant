@@ -38,4 +38,38 @@ describe('Adamant CLI configuration', () => {
       /must be an origin/,
     )
   })
+
+  it('accepts every loopback spelling, including bracketed IPv6', () => {
+    for (const url of ['http://localhost:8787', 'http://127.0.0.1:8787', 'http://[::1]:8787']) {
+      assert.equal(loadCliConfig({ ADAMANT_API_URL: url, ADAMANT_SESSION: 's' }).apiUrl.origin, url)
+    }
+  })
+
+  it('explains a missing scheme instead of calling it a path', () => {
+    assert.throws(
+      () => loadCliConfig({ ADAMANT_API_URL: 'localhost:8787', ADAMANT_SESSION: 's' }),
+      /must start with https:\/\//,
+    )
+  })
+
+  it('refuses credentials in the URL, which fetch would reject on every call', () => {
+    assert.throws(
+      () =>
+        loadCliConfig({
+          ADAMANT_API_URL: 'https://user:pass@adamant.example',
+          ADAMANT_SESSION: 's',
+        }),
+      /must not contain credentials/,
+    )
+  })
+
+  it('refuses a session a bearer header cannot carry', () => {
+    for (const session of ['two words', 'line\nbreak', 'tab\there']) {
+      assert.throws(
+        () => loadCliConfig({ ADAMANT_SESSION: session }),
+        /must not contain spaces/,
+        JSON.stringify(session),
+      )
+    }
+  })
 })

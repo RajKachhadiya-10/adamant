@@ -1,4 +1,4 @@
-import { type AdamantApi } from './api.ts'
+import { ApiError, type AdamantApi } from './api.ts'
 
 export type ActivityEvent = {
   id: string
@@ -17,6 +17,16 @@ type ParsedFrame = {
   type?: string
   data?: string
 }
+
+// The API sends a comment every 20 s. Two missed heartbeats means the socket
+// is gone even though no error arrived (a laptop that slept, a NAT that
+// forgot the mapping); without this `watch` sat on a dead connection forever.
+const IDLE_TIMEOUT_MS = 45_000
+const CONNECT_TIMEOUT_MS = 10_000
+
+// Ids already delivered. A resume whose Last-Event-ID has aged out of the
+// API's history replays all of it; those events would otherwise show twice.
+const SEEN_EVENT_LIMIT = 2_000
 
 function parseFrame(frame: string): ParsedFrame | undefined {
   const parsed: ParsedFrame = {}
@@ -62,8 +72,22 @@ function toActivityEvent(frame: ParsedFrame): ActivityEvent | undefined {
   }
 }
 
-function backoffDelay(attempt: number): number {
-  return Math.min(1_000 * 2 ** Math.min(attempt, 5), 15_000)
+/** 0.5 s, 1 s, 2 s … up to 15 s, jittered so restarted APIs are not stampeded. */
+export function backoffDelay(attempt: number): number {
+  const base = Math.min(500 * 2 ** Math.max(0, attempt - 1), 15_000)
+  return Math.round(base * (0.8 + Math.random() * 0.4))
+}
+
+/** A refusal retrying cannot fix: a bad session, a wrong URL. */
+function isFatal(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError &&
+    error.status !== undefined &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408 &&
+    error.status !== 429
+  )
 }
 
 function wait(delayMs: number, signal: AbortSignal): Promise<void> {
@@ -80,59 +104,108 @@ function wait(delayMs: number, signal: AbortSignal): Promise<void> {
   })
 }
 
+export type FollowActivityOptions = {
+  signal: AbortSignal
+  onEvent(event: ActivityEvent): void
+  onConnection(state: ActivityConnectionState): void
+  onError(error: Error): void
+  connectTimeoutMs?: number
+  idleTimeoutMs?: number
+}
+
+/**
+ * Follows `GET /activity` until `signal` aborts, reconnecting with
+ * Last-Event-ID after a drop. Returns early only for a refusal retrying
+ * cannot fix, after reporting it through `onError`.
+ */
 export async function followActivity(
   api: AdamantApi,
-  options: {
-    signal: AbortSignal
-    onEvent(event: ActivityEvent): void
-    onConnection(state: ActivityConnectionState): void
-    onError(error: Error): void
-  },
+  options: FollowActivityOptions,
 ): Promise<void> {
+  const connectTimeoutMs = options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS
+  const idleTimeoutMs = options.idleTimeoutMs ?? IDLE_TIMEOUT_MS
+  const seen = new Set<string>()
   let lastEventId: string | undefined
   let attempt = 0
 
   while (!options.signal.aborted) {
+    const delayMs = backoffDelay(attempt)
     options.onConnection(
-      attempt === 0
-        ? { kind: 'connecting' }
-        : {
-            kind: 'reconnecting',
-            attempt,
-            delayMs: backoffDelay(attempt),
-          },
+      attempt === 0 ? { kind: 'connecting' } : { kind: 'reconnecting', attempt, delayMs },
     )
-    if (attempt > 0) await wait(backoffDelay(attempt), options.signal)
+    if (attempt > 0) await wait(delayMs, options.signal)
     if (options.signal.aborted) break
 
-    try {
-      const response = await api.openActivity(lastEventId, options.signal)
-      options.onConnection({ kind: 'connected' })
-      attempt = 0
+    const connection = new AbortController()
+    const cancel = () => connection.abort()
+    options.signal.addEventListener('abort', cancel, { once: true })
+    let stalled = false
+    let connected = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expectDataWithin = (ms: number) => {
+      clearTimeout(timer)
+      timer = setTimeout(() => {
+        stalled = true
+        connection.abort()
+      }, ms)
+    }
 
+    try {
+      expectDataWithin(connectTimeoutMs)
+      const response = await api.openActivity(lastEventId, connection.signal)
       const reader = response.body?.getReader()
       if (!reader) throw new Error('The activity stream ended before it started.')
+      expectDataWithin(idleTimeoutMs)
+      connected = true
+      options.onConnection({ kind: 'connected' })
 
       const decoder = new TextDecoder()
       let remainder = ''
-      while (!options.signal.aborted) {
+      for (;;) {
         const next = await reader.read()
         if (next.done) break
+        // Backoff resets on data, not on headers: something that accepts the
+        // request and hangs up at once must not be retried twice a second.
+        attempt = 0
+        expectDataWithin(idleTimeoutMs)
         const parsed = parseSseFrames(remainder + decoder.decode(next.value, { stream: true }))
         remainder = parsed.remainder
         for (const frame of parsed.frames) {
           const event = toActivityEvent(frame)
           if (!event) continue
           lastEventId = event.id
+          if (seen.has(event.id)) continue
+          seen.add(event.id)
+          if (seen.size > SEEN_EVENT_LIMIT) {
+            const oldest = seen.values().next().value
+            if (oldest !== undefined) seen.delete(oldest)
+          }
           options.onEvent(event)
         }
       }
-      reader.releaseLock()
-      if (!options.signal.aborted) attempt = 1
+      // The API ended the stream (a restart or deploy); come back quickly.
+      attempt = Math.max(1, attempt + 1)
     } catch (error) {
       if (options.signal.aborted) break
-      options.onError(error instanceof Error ? error : new Error('Activity connection failed.'))
+      if (isFatal(error)) {
+        options.onError(error)
+        return
+      }
+      // A stream that went quiet is reported by the reconnect itself.
+      if (stalled && !connected) {
+        options.onError(
+          new Error(
+            `${api.origin} did not answer within ${Math.round(connectTimeoutMs / 1_000)} s.`,
+          ),
+        )
+      } else if (!stalled) {
+        options.onError(error instanceof Error ? error : new Error('Activity connection failed.'))
+      }
       attempt = Math.max(1, attempt + 1)
+    } finally {
+      clearTimeout(timer)
+      options.signal.removeEventListener('abort', cancel)
+      connection.abort()
     }
   }
 }

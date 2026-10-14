@@ -266,7 +266,7 @@ describe('worker', () => {
   })
 
   it('marks the run failed when the run tools cannot be built on the last attempt', async () => {
-    const finished: string[] = []
+    const finished: (string | undefined)[][] = []
 
     await assert.rejects(
       () =>
@@ -277,13 +277,14 @@ describe('worker', () => {
             createTools: () => {
               throw new Error('workspace root is not writable')
             },
-            markFinished: async (_runId, status) => void finished.push(status),
+            markFinished: async (_runId, status, reason) => void finished.push([status, reason]),
           }),
         ),
       /workspace root is not writable/,
     )
 
-    assert.deepEqual(finished, ['failed'])
+    // The reason is what `adamant run` shows; the stack stays in the worker log.
+    assert.deepEqual(finished, [['failed', 'workspace root is not writable']])
   })
 
   it('builds the run tools from the loaded run, not from the payload', async () => {

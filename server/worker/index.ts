@@ -39,7 +39,7 @@ export type RunTools = {
 export type GraphStepDependencies = {
   loadRun: (runId: string) => Promise<HealRun | null>
   markRunning: (runId: string, retry: boolean) => Promise<boolean>
-  markFinished: (runId: string, status: 'succeeded' | 'failed') => Promise<void>
+  markFinished: (runId: string, status: 'succeeded' | 'failed', reason?: string) => Promise<void>
   /** Built per run: the worktree, refspec and recorder are all run-scoped. */
   createTools: (run: HealRun) => RunTools
   llmOptions?: OpenAiLlmOptions
@@ -133,7 +133,11 @@ export async function graphStep(
     await deps.markFinished(runId, status)
   } catch (error) {
     if (isLastAttempt(helpers)) {
-      await deps.markFinished(runId, 'failed')
+      await deps.markFinished(
+        runId,
+        'failed',
+        error instanceof Error ? error.message : 'graph_step failed',
+      )
     }
     throw error
   } finally {

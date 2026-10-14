@@ -9,6 +9,7 @@ import {
   type RunSummary,
 } from '@adamant/contract'
 import { auditEvents, createDb, repositories, runs, type Db } from '../../db/client.ts'
+import { auditEvent, type ActivityService } from './activityService.ts'
 import { enqueueGraphStep } from './jobs.ts'
 
 export type CreateRunInput = {
@@ -105,6 +106,15 @@ export function createPostgresRunApiStore(db: Db): RunApiStore {
         const created = inserted[0]
         if (created) {
           await enqueueGraphStep(tx, runId)
+          // The webhook path records the same event. Without it a run started
+          // here never reached `adamant watch`, and `adamant run` showed an
+          // empty trail until the worker wrote something.
+          await tx.insert(auditEvents).values({
+            runId,
+            eventType: 'run.queued',
+            payload: { sourceSha: input.sourceSha },
+            actorUserId: input.userId,
+          })
           return { run: toRunSummary(created), created: true }
         }
 
@@ -154,6 +164,80 @@ export function createPostgresRunApiStore(db: Db): RunApiStore {
         run: toRunSummary(run),
         auditEvents: events.map(toAuditEvent),
       })
+    },
+  }
+}
+
+// The stand-in keeps the newest runs only; a dev server can stay up for days.
+const MEMORY_RUN_LIMIT = 1_000
+
+/**
+ * `/runs` without a database. Same contract as Postgres, so the CLI works
+ * against a database-free API; the schema CRUD it replaces answered in another
+ * shape and `adamant runs` failed on it. No worker claims these runs.
+ */
+export function createMemoryRunApiStore(
+  options: { activity?: Pick<ActivityService, 'publish'> } = {},
+): RunApiStore {
+  const entries = new Map<
+    string,
+    { run: RunSummary; userId: string; key: string; events: AuditEvent[] }
+  >()
+  const idsByKey = new Map<string, string>()
+  const keyOf = (repositoryId: string, idempotencyKey: string) =>
+    JSON.stringify([repositoryId, idempotencyKey])
+
+  return {
+    async create(input) {
+      const key = keyOf(input.repositoryId, input.idempotencyKey)
+      const existing = entries.get(idsByKey.get(key) ?? '')
+      if (existing) return { run: existing.run, created: false }
+
+      const id = randomUUID()
+      const now = new Date()
+      const run = RunSummarySchema.parse({
+        id,
+        repositoryId: input.repositoryId,
+        sourceSha: input.sourceSha,
+        targetBranch: `adamant/${id}`,
+        status: 'queued',
+        version: 1,
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      })
+      const queued = {
+        id: randomUUID(),
+        runId: id,
+        eventType: 'run.queued',
+        payload: { sourceSha: input.sourceSha },
+        actorUserId: input.userId,
+        createdAt: now,
+      }
+      entries.set(id, { run, userId: input.userId, key, events: [toAuditEvent(queued)] })
+      idsByKey.set(key, id)
+      if (entries.size > MEMORY_RUN_LIMIT) {
+        const [oldestId, oldest] = entries.entries().next().value ?? []
+        if (oldestId && oldest) {
+          entries.delete(oldestId)
+          idsByKey.delete(oldest.key)
+        }
+      }
+      options.activity?.publish(auditEvent(queued))
+      return { run, created: true }
+    },
+
+    async list(userId) {
+      return [...entries.values()]
+        .filter((entry) => entry.userId === userId)
+        .map((entry) => entry.run)
+        .reverse()
+        .slice(0, RUN_LIST_LIMIT)
+    },
+
+    async detail(userId, runId) {
+      const entry = entries.get(runId)
+      if (!entry || entry.userId !== userId) return null
+      return { run: entry.run, auditEvents: [...entry.events] }
     },
   }
 }

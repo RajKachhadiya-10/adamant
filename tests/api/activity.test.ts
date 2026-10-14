@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, describe, it } from 'node:test'
+import { type Pool } from 'pg'
 import { createActivityRoute } from '../../server/api/routes/activity.ts'
 import { createServerApp } from '../../server/api/server.ts'
-import { createActivityService } from '../../server/api/services/activityService.ts'
+import {
+  ACTIVITY_CHANNEL,
+  createActivityService,
+  listenForActivity,
+} from '../../server/api/services/activityService.ts'
 import { webhookDeliveries, type Db } from '../../server/db/client.ts'
 
 const SESSION = 'test-session-secret'
@@ -475,6 +481,80 @@ describe('Activity from the database', () => {
     assert.equal(reads.count, afterLeave)
   })
 
+  it('reads as soon as a change is signalled instead of at the next poll', async () => {
+    const tables = { deliveries: [] as Row[], audits: [] as Row[] }
+    const { database } = fakeDb(tables)
+    let signal: (() => void) | undefined
+    let stops = 0
+    const service = createActivityService({
+      database,
+      // Far enough out that only the signal can explain a delivery.
+      pollIntervalMs: 60_000,
+      changes: (onChange) => {
+        signal = onChange
+        return () => {
+          stops += 1
+        }
+      },
+    })
+    const received: string[] = []
+    const unsubscribe = service.subscribe((event) => received.push(event.id))
+
+    tables.audits.push(audit('a1'))
+    signal?.()
+    await waitTick(20)
+    assert.deepEqual(received, ['audit_a1'])
+
+    unsubscribe()
+    assert.equal(stops, 1, 'stops listening with the last client')
+  })
+
+  it('reads again when a change lands during a read, so it is not left for the poll', async () => {
+    const tables = { deliveries: [] as Row[], audits: [] as Row[] }
+    let release: (() => void) | undefined
+    const reads = { count: 0 }
+    const database = {
+      select: () => ({
+        from: (table: unknown) => {
+          const chain = {
+            where: () => chain,
+            orderBy: () => chain,
+            limit: async () => {
+              reads.count += 1
+              // Hold the first read open until the test lets it finish.
+              if (reads.count === 1) await new Promise<void>((resolve) => (release = resolve))
+              return [...(table === webhookDeliveries ? tables.deliveries : tables.audits)]
+            },
+          }
+          return chain
+        },
+      }),
+    } as unknown as Db
+    let signal: (() => void) | undefined
+    const service = createActivityService({
+      database,
+      pollIntervalMs: 60_000,
+      changes: (onChange) => {
+        signal = onChange
+        return () => {}
+      },
+    })
+    const received: string[] = []
+    const unsubscribe = service.subscribe((event) => received.push(event.id))
+
+    try {
+      signal?.()
+      await waitTick(5)
+      tables.audits.push(audit('late'))
+      signal?.()
+      release?.()
+      await waitTick(20)
+      assert.deepEqual(received, ['audit_late'])
+    } finally {
+      unsubscribe()
+    }
+  })
+
   it('bounds the history it reads on connect', async () => {
     const { database, reads } = fakeDb({ deliveries: [], audits: [audit('a1')] })
     const service = createActivityService({ database, historyLimit: 50 })
@@ -547,5 +627,71 @@ describe('Activity from the database', () => {
       clearTimeout(keepAlive)
       controller.abort()
     }
+  })
+})
+
+describe('LISTEN for activity', () => {
+  class FakeClient extends EventEmitter {
+    readonly queries: string[] = []
+    readonly released: unknown[] = []
+    async query(sql: string) {
+      this.queries.push(sql)
+    }
+    release(destroy?: unknown) {
+      this.released.push(destroy ?? 'returned')
+    }
+  }
+
+  function fakePool() {
+    const clients: FakeClient[] = []
+    const pool = {
+      connect: async () => {
+        const client = new FakeClient()
+        clients.push(client)
+        return client
+      },
+    } as unknown as Pool
+    return { pool, clients }
+  }
+
+  it('wakes on its channel, catches up once listening, and hands the connection back', async () => {
+    const { pool, clients } = fakePool()
+    let changes = 0
+    const stop = listenForActivity(pool)(() => (changes += 1))
+    await waitTick()
+    const client = clients[0]
+    assert.ok(client)
+
+    assert.deepEqual(client.queries, [`LISTEN ${ACTIVITY_CHANNEL}`])
+    assert.equal(changes, 1, 'rows from before LISTEN are read once')
+
+    client.emit('notification', { channel: ACTIVITY_CHANNEL, processId: 1 })
+    client.emit('notification', { channel: 'something_else', processId: 1 })
+    assert.equal(changes, 2)
+
+    stop()
+    await waitTick()
+    assert.deepEqual(client.queries, [`LISTEN ${ACTIVITY_CHANNEL}`, `UNLISTEN ${ACTIVITY_CHANNEL}`])
+    // Reused, not destroyed, and without our listeners left on a shared client.
+    assert.deepEqual(client.released, ['returned'])
+    assert.equal(client.listenerCount('notification'), 0)
+    assert.equal(client.listenerCount('error'), 0)
+  })
+
+  it('destroys a broken connection and listens again on a new one', async () => {
+    const { pool, clients } = fakePool()
+    let changes = 0
+    const stop = listenForActivity(pool, { retryMs: 5 })(() => (changes += 1))
+    await waitTick()
+
+    clients[0]?.emit('error', new Error('terminating connection'))
+    clients[0]?.emit('end')
+    await waitTick(30)
+    stop()
+
+    assert.deepEqual(clients[0]?.released, [true])
+    assert.equal(clients.length, 2, 'one reconnect, not one per event')
+    assert.deepEqual(clients[1]?.queries.slice(0, 1), [`LISTEN ${ACTIVITY_CHANNEL}`])
+    assert.equal(changes, 2, 'catches up after reconnecting')
   })
 })

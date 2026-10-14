@@ -208,7 +208,7 @@ export async function upsertOAuthIdentity(
 export async function createSession(
   db: Db,
   userId: string,
-): Promise<{ token: string; sessionId: string }> {
+): Promise<{ token: string; sessionId: string; expiresAt: Date }> {
   const token = generateSessionToken()
   const tokenHash = hashSessionToken(token)
 
@@ -234,6 +234,7 @@ export async function createSession(
   return {
     token,
     sessionId: session.id,
+    expiresAt,
   }
 }
 

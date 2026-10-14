@@ -223,6 +223,8 @@ export function createApp(
   stores = createStores(),
   app: HonoApp = new Hono(),
   activityService?: ActivityService,
+  /** Resources another router serves; their CRUD routes are not mounted. */
+  skip: readonly ResourceName[] = [],
 ) {
   app.get('/health', (c) => c.json({ status: 'ok' }))
 
@@ -230,6 +232,7 @@ export function createApp(
     ResourceName,
     ResourceConfig,
   ][]) {
+    if (skip.includes(name)) continue
     const store = stores[name]
 
     app

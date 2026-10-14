@@ -42,7 +42,9 @@ The API authenticates and ACKs. It does **not** run models or Docker. Workers
 | Hosted App + worker, CLI attached to that API, sandbox, merge our heal PR | Electron Heal, OAuth, HITL, agent-on-checkout, fingerprints |
 
 Auth today: webhook HMAC. Seeded session (HTTPS) for the CLI and
-`POST /runs`.
+`POST /runs`: `pnpm --filter @adamant/server session:create` adds a
+`sessions` row and prints its token once. `ADAMANT_SESSION_SECRET` stands
+in only when the API has no database.
 
 ## Two surfaces
 

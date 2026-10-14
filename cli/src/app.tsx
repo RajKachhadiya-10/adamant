@@ -1,9 +1,11 @@
 import cliSpinners from 'cli-spinners'
+import { type ScrollBoxRenderable } from '@opentui/core'
 import { useKeyboard } from '@opentui/react'
+import { homedir } from 'node:os'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { X_LOGO } from './branding.ts'
-import { type CommandDefinition, suggestionsFor } from './commands.ts'
-import { type CommandController, type OutputLine } from './controller.ts'
+import { type CommandDefinition, resolveSubmission, suggestionsFor } from './commands.ts'
+import { type CommandController, formatActivity, type OutputLine } from './controller.ts'
 import { type ActivityConnectionState, type ActivityEvent } from './sse.ts'
 
 const accent = '#55a8ff'
@@ -11,6 +13,11 @@ const brandGold = '#d6a62b'
 const muted = '#8b949e'
 const error = '#f97583'
 const success = '#56d364'
+
+// Scrollback kept in memory. Older lines are dropped rather than hidden, so a
+// long session does not re-render an ever-growing list.
+const MAX_LINES = 1_000
+const MAX_ACTIVITY = 200
 
 type CliAppProps = {
   controller: CommandController
@@ -34,7 +41,8 @@ function toneColor(tone: OutputLine['tone']): string {
 }
 
 function connectionLabel(state: ActivityConnectionState | undefined): string | undefined {
-  if (!state || state.kind === 'connected') return undefined
+  if (!state) return undefined
+  if (state.kind === 'connected') return 'Watching live activity.'
   if (state.kind === 'connecting') return 'Connecting to activity…'
   return `Reconnecting in ${Math.ceil(state.delayMs / 1_000)}s (attempt ${state.attempt})…`
 }
@@ -43,15 +51,27 @@ function suggestionLabel(command: CommandDefinition, selected: boolean): string 
   return `${selected ? '›' : ' '} ${command.usage}  ${command.description}`
 }
 
+function displayPath(path: string): string {
+  const home = homedir()
+  return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path
+}
+
+const keep = <T,>(items: readonly T[], limit: number): readonly T[] =>
+  items.length > limit ? items.slice(-limit) : items
+
 export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
   const [input, setInput] = useState('')
   const [lines, setLines] = useState<readonly OutputLine[]>([])
   const [activity, setActivity] = useState<readonly ActivityEvent[]>([])
   const [suggestionIndex, setSuggestionIndex] = useState(0)
+  // Rows of the latest `/runs`; arrows pick one and Enter on an empty prompt opens it.
+  const [runChoices, setRunChoices] = useState<readonly OutputLine[]>([])
   const [selectedRun, setSelectedRun] = useState(0)
   const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false)
   const [connection, setConnection] = useState<ActivityConnectionState>()
   const watchAbortRef = useRef<AbortController | undefined>(undefined)
+  const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const [spinnerFrame, setSpinnerFrame] = useState(0)
   const suggestions = useMemo(() => suggestionsFor(input), [input])
   const spinner = cliSpinners.dots
@@ -81,48 +101,101 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
     setConnection(undefined)
   }
 
+  const appendLines = (added: readonly OutputLine[]) => {
+    setLines((current) => keep([...current, ...added], MAX_LINES))
+  }
+
   const appendError = (message: string) => {
-    setLines((current) => [...current, { id: crypto.randomUUID(), tone: 'error', text: message }])
+    appendLines([{ id: crypto.randomUUID(), tone: 'error', text: message }])
+  }
+
+  /** A reconnect loop repeats the same failure; one line per watch says it. */
+  const appendWatchError = (message: string, shown: Set<string>) => {
+    setLines((current) => {
+      const last = current[current.length - 1]
+      if (last && shown.has(last.id) && last.text === message) return current
+      const added: OutputLine = { id: crypto.randomUUID(), tone: 'error', text: message }
+      shown.add(added.id)
+      return keep([...current, added], MAX_LINES)
+    })
+  }
+
+  const clearScreen = () => {
+    setLines([])
+    setActivity([])
+    setRunChoices([])
   }
 
   const startWatching = () => {
     stopWatching()
     const abort = new AbortController()
     watchAbortRef.current = abort
+    const watchErrors = new Set<string>()
     setActivity([])
-    void controller.followActivity({
-      signal: abort.signal,
-      onEvent: (event) => {
-        setActivity((current) => [...current.slice(-99), event])
-      },
-      onConnection: setConnection,
-      onError: (connectionError) => appendError(connectionError.message),
-    })
+    void controller
+      .followActivity({
+        signal: abort.signal,
+        onEvent: (event) => {
+          setActivity((current) => keep([...current, event], MAX_ACTIVITY))
+        },
+        onConnection: setConnection,
+        onError: (connectionError) => appendWatchError(connectionError.message, watchErrors),
+      })
+      .finally(() => {
+        // It returns on its own only after a refusal it reported; stop showing a connection.
+        if (watchAbortRef.current === abort) {
+          watchAbortRef.current = undefined
+          setConnection(undefined)
+        }
+      })
   }
 
-  const submit = async (submittedInput = input) => {
-    if (!submittedInput.trim()) return
+  const execute = async (command: string) => {
     stopWatching()
+    // After scrolling back, a new command's output would land out of view;
+    // returning to the bottom also re-engages sticky scrolling.
+    const scroll = scrollRef.current
+    scroll?.scrollTo(scroll.scrollHeight)
+    busyRef.current = true
     setBusy(true)
     setInput('')
     try {
-      const result = await controller.execute(submittedInput)
+      const result = await controller.execute(command)
       if (result.kind === 'clear') {
-        setLines([])
-        setActivity([])
+        clearScreen()
       } else if (result.kind === 'quit') {
         onExit()
       } else if (result.kind === 'watch') {
         startWatching()
       } else {
-        setLines((current) => [...current, ...result.lines])
-        setSelectedRun(0)
+        appendLines(result.lines)
+        if (result.runs) {
+          setRunChoices(result.lines.filter((entry) => entry.runId))
+          setSelectedRun(0)
+        }
       }
     } catch (commandError) {
       appendError(commandError instanceof Error ? commandError.message : 'Command failed.')
     } finally {
+      busyRef.current = false
       setBusy(false)
     }
+  }
+
+  const submit = async (submittedInput = input) => {
+    // One command at a time; the prompt keeps what was typed meanwhile.
+    if (busyRef.current) return
+    if (!submittedInput.trim()) {
+      const runId = runChoices[selectedRun]?.runId
+      if (runId) await execute(`/run ${runId}`)
+      return
+    }
+    const resolved = resolveSubmission(submittedInput, suggestions[suggestionIndex])
+    if ('complete' in resolved) {
+      setInput(resolved.complete)
+      return
+    }
+    await execute(resolved.submit)
   }
 
   const completeSuggestion = () => {
@@ -139,8 +212,7 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
     }
     if (key.ctrl && key.name === 'l') {
       key.preventDefault()
-      setLines([])
-      setActivity([])
+      clearScreen()
       return
     }
     if (key.name === 'escape') {
@@ -148,40 +220,47 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
       setInput('')
       return
     }
+    if (key.name === 'pageup' || key.name === 'pagedown') {
+      key.preventDefault()
+      scrollRef.current?.scrollBy(key.name === 'pageup' ? -0.8 : 0.8, 'viewport')
+      return
+    }
     if (key.name === 'tab' && suggestions.length > 0) {
       key.preventDefault()
       completeSuggestion()
       return
     }
-    if ((key.name === 'up' || key.name === 'k') && suggestions.length > 0) {
+    // j and k are letters while anything is typed; they only navigate an empty prompt.
+    const plain = !key.ctrl && !key.meta && !key.shift && input === ''
+    const up = key.name === 'up' || (plain && key.name === 'k')
+    const down = key.name === 'down' || (plain && key.name === 'j')
+    if (!up && !down) return
+    if (suggestions.length > 0) {
       key.preventDefault()
-      setSuggestionIndex((current) => (current - 1 + suggestions.length) % suggestions.length)
-      return
-    }
-    if ((key.name === 'down' || key.name === 'j') && suggestions.length > 0) {
+      setSuggestionIndex(
+        (current) => (current + (up ? -1 : 1) + suggestions.length) % suggestions.length,
+      )
+    } else if (runChoices.length > 0) {
       key.preventDefault()
-      setSuggestionIndex((current) => (current + 1) % suggestions.length)
-      return
-    }
-    if (key.name === 'up' || key.name === 'k') {
-      setSelectedRun((current) => Math.max(0, current - 1))
-    }
-    if (key.name === 'down' || key.name === 'j') {
-      setSelectedRun((current) => current + 1)
+      setSelectedRun((current) =>
+        Math.min(runChoices.length - 1, Math.max(0, current + (up ? -1 : 1))),
+      )
     }
   })
 
   const status = connectionLabel(connection)
-  const activityRows = activity.map((event) => {
-    const runId = typeof event.payload.runId === 'string' ? ` · ${event.payload.runId}` : ''
-    return `${event.type}${runId}`
-  })
-  const showBrand = lines.length === 0 && activityRows.length === 0
+  const selectedLineId = runChoices[selectedRun]?.id
+  const showBrand = lines.length === 0 && activity.length === 0
+  const version = `v${process.env.npm_package_version ?? '0.1.0'}`
+  const footer =
+    runChoices.length > 0 && input === ''
+      ? '↑↓ select run · Enter open · PgUp/PgDn scroll · Ctrl+L clear · Ctrl+C quit'
+      : '↑↓ navigate · Tab complete · PgUp/PgDn scroll · Ctrl+L clear · Ctrl+C quit'
 
   return (
     <box flexDirection="column" style={{ height: '100%', paddingLeft: 1, paddingRight: 1 }}>
       {showBrand ? (
-        <box flexDirection="row">
+        <box flexDirection="row" style={{ flexShrink: 0 }}>
           <box flexDirection="column">
             {X_LOGO.map((row, index) => (
               <text key={`${index}-${row}`} fg={brandGold} attributes={1}>
@@ -194,41 +273,57 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
               ADAMANT
             </text>
             <text fg="#e6edf3">Hosted repair CLI</text>
-            <text fg={muted}>{`v${process.env.npm_package_version ?? '0.1.0'}`}</text>
+            <text fg={muted}>{version}</text>
           </box>
         </box>
       ) : (
-        <box flexDirection="column">
+        <box flexDirection="column" style={{ flexShrink: 0 }}>
           <text fg={brandGold} attributes={1}>
             ADAMANT
           </text>
-          <text
-            fg={muted}
-          >{`v${process.env.npm_package_version ?? '0.1.0'} · ${process.cwd()}`}</text>
+          <text fg={muted}>{`${version} · ${displayPath(process.cwd())}`}</text>
         </box>
       )}
 
-      <box flexDirection="column" style={{ flexGrow: 1, paddingTop: 1 }}>
-        {lines.map((entry, index) => (
-          <text key={entry.id} fg={index === selectedRun ? accent : toneColor(entry.tone)}>
+      {/* Scrolls instead of overflowing: past a screenful, new output used to
+          draw over the prompt and the newest lines were never visible. */}
+      <scrollbox
+        ref={scrollRef}
+        stickyScroll
+        stickyStart="bottom"
+        style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, marginTop: 1 }}
+      >
+        {lines.map((entry) => (
+          <text
+            key={entry.id}
+            fg={entry.id === selectedLineId ? accent : toneColor(entry.tone)}
+            {...(entry.id === selectedLineId ? { attributes: 1 } : {})}
+          >
             {entry.text}
           </text>
         ))}
-        {activityRows.map((entry, index) => (
-          <text
-            key={`${index}-${entry}`}
-            fg={index === activityRows.length - 1 ? '#e6edf3' : muted}
-          >
-            {entry}
+        {activity.map((event, index) => (
+          <text key={event.id} fg={index === activity.length - 1 ? '#e6edf3' : muted}>
+            {formatActivity(event)}
           </text>
         ))}
-        {busy ? <text fg={accent}>{`${spinner.frames[spinnerFrame] ?? '·'} Working…`}</text> : null}
-        {status ? <text fg={muted}>{status}</text> : null}
-      </box>
+      </scrollbox>
+
+      {/* Everything below the scrollback keeps its rows; only the scrollback gives way. */}
+      {busy ? (
+        <text fg={accent} style={{ flexShrink: 0 }}>
+          {`${spinner.frames[spinnerFrame] ?? '·'} Working…`}
+        </text>
+      ) : null}
+      {status ? (
+        <text fg={muted} style={{ flexShrink: 0 }}>
+          {status}
+        </text>
+      ) : null}
 
       {suggestions.length > 0 ? (
-        <box flexDirection="column">
-          {suggestions.slice(0, 5).map((suggestion, index) => (
+        <box flexDirection="column" style={{ flexShrink: 0 }}>
+          {suggestions.map((suggestion, index) => (
             <text key={suggestion.name} fg={index === suggestionIndex ? accent : muted}>
               {suggestionLabel(suggestion, index === suggestionIndex)}
             </text>
@@ -236,7 +331,7 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
         </box>
       ) : null}
 
-      <box flexDirection="row">
+      <box flexDirection="row" style={{ flexShrink: 0 }}>
         <text fg={accent}>› </text>
         <input
           focused
@@ -247,7 +342,9 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
           style={{ flexGrow: 1 }}
         />
       </box>
-      <text fg={muted}>↑↓ navigate · Tab complete · Ctrl+L clear · Ctrl+C quit</text>
+      <text fg={muted} style={{ flexShrink: 0 }}>
+        {footer}
+      </text>
     </box>
   )
 }

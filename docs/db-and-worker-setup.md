@@ -25,6 +25,13 @@ and the worker (`server/worker/index.ts`). The worker connects to Postgres
 via graphile-worker and logs `@adamant/worker connected and waiting for jobs`
 once it's up.
 
+Then give the CLI a session and check it:
+
+```bash
+export ADAMANT_SESSION=$(docker compose exec -T api node --experimental-strip-types api/create-session.ts)
+pnpm adamant status
+```
+
 ## Directory boundaries
 
 - `server/db` — Drizzle schema and `createDb`. Does not import Hono or

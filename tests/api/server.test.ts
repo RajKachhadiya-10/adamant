@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import { afterEach, describe, it } from 'node:test'
-import { type RunSummary } from '@adamant/contract'
+import { RunDetailSchema, RunSummarySchema, type RunSummary } from '@adamant/contract'
 import { createServerApp, shutdownGracefully } from '../../server/api/server.ts'
+import { createActivityService } from '../../server/api/services/activityService.ts'
 import { type RunApiStore } from '../../server/api/services/runStore.ts'
 
 const session = 'secret'
@@ -93,6 +94,61 @@ describe('composed API', () => {
       headers: { ADAMANT_SESSION: session },
     })
     assert.equal(allowed.status, 200)
+  })
+
+  it('serves the CLI run contract without a database', async () => {
+    process.env.ADAMANT_SESSION_SECRET = session
+    process.env.ADAMANT_SEED_USER_ID = seedUserId
+    const activityService = createActivityService()
+    const app = createServerApp(undefined, { activityService })
+    // What the CLI sends: a bearer token and camelCase fields.
+    const headers = {
+      Authorization: `Bearer ${session}`,
+      'content-type': 'application/json',
+      'idempotency-key': 'key-1',
+    }
+    const body = JSON.stringify({ repositoryId: 'repo-1', sourceSha: 'a'.repeat(40) })
+
+    const created = await app.request('/runs', { method: 'POST', headers, body })
+    assert.equal(created.status, 202)
+    const createdBody = (await created.json()) as { run: unknown }
+    assert.deepEqual(Object.keys(createdBody), ['run'])
+    const run = RunSummarySchema.parse(createdBody.run)
+    assert.equal(run.status, 'queued')
+    assert.equal(run.targetBranch, `adamant/${run.id}`)
+
+    const replayed = await app.request('/runs', { method: 'POST', headers, body })
+    assert.equal(replayed.status, 200)
+    assert.equal(((await replayed.json()) as { run: RunSummary }).run.id, run.id)
+
+    const listBody = (await (await app.request('/runs', { headers })).json()) as { runs: unknown[] }
+    assert.deepEqual(Object.keys(listBody), ['runs'])
+    assert.deepEqual(
+      listBody.runs.map((listed) => RunSummarySchema.parse(listed).id),
+      [run.id],
+    )
+
+    const detail = RunDetailSchema.parse(
+      await (await app.request(`/runs/${run.id}`, { headers })).json(),
+    )
+    assert.deepEqual(
+      detail.auditEvents.map((event) => [event.eventType, event.actorUserId]),
+      [['run.queued', seedUserId]],
+    )
+
+    // `adamant watch` sees the run start.
+    const history = await activityService.getHistory()
+    assert.ok(
+      history.some((event) => event.type === 'audit:run.queued' && event.payload.runId === run.id),
+    )
+
+    // The schema CRUD no longer answers under /runs.
+    const patched = await app.request(`/runs/${run.id}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ status: 'succeeded' }),
+    })
+    assert.equal(patched.status, 404)
   })
 
   it('accepts a signed GitHub delivery without a CLI session', async () => {

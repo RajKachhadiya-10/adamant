@@ -14,7 +14,7 @@ export type CommandDefinition = {
 
 export const commandDefinitions: readonly CommandDefinition[] = [
   { name: 'help', usage: '/help', description: 'Show available commands' },
-  { name: 'status', usage: '/status', description: 'Check hosted API health' },
+  { name: 'status', usage: '/status', description: 'Check the API and your session' },
   { name: 'runs', usage: '/runs', description: 'List visible healing runs' },
   { name: 'run', usage: '/run <id>', description: 'Show a run and its audit trail' },
   { name: 'watch', usage: '/watch', description: 'Follow live webhook and audit activity' },
@@ -80,6 +80,24 @@ export function suggestionsFor(input: string): readonly CommandDefinition[] {
   if (!input.startsWith('/')) return []
   const query = input.slice(1).toLowerCase()
   return commandDefinitions.filter((command) => command.name.startsWith(query))
+}
+
+/**
+ * What Enter does with the prompt. A partly typed name runs the highlighted
+ * suggestion (`/st` runs `/status`) instead of failing as an unknown command;
+ * a command that needs arguments is completed so they can be typed next.
+ */
+export function resolveSubmission(
+  input: string,
+  highlighted: CommandDefinition | undefined,
+): { submit: string } | { complete: string } {
+  const typed = input.trim()
+  const [word = '', ...args] = typed.split(/\s+/)
+  const exact = commandDefinitions.find((command) => `/${command.name}` === word)
+  const target = exact ?? (args.length === 0 && word.startsWith('/') ? highlighted : undefined)
+  if (!target) return { submit: typed }
+  if (args.length === 0 && target.usage.includes(' ')) return { complete: `/${target.name} ` }
+  return { submit: exact ? typed : `/${target.name}` }
 }
 
 export function argvToCommand(argv: readonly string[]): string | undefined {
