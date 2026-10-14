@@ -1,0 +1,502 @@
+#!/usr/bin/env bash
+# Start the local API and worker, then the terminal CLI (not the Electron app).
+#
+# One-time PATH install, without sudo and without editing the shell rc:
+#   ./scripts/adamant install
+# That links this file into a writable directory already on PATH (~/.local/bin,
+# or `pnpm bin -g` when that directory exists and is writable) only when the
+# name `adamant` is free. If `command -v adamant` already points at another
+# binary — the CLI package bin from `npm link` is the usual case — install
+# leaves it alone and prints this script's path. Running ./scripts/adamant
+# does not require that install. `install owner/repo` is not this PATH link:
+# it is the CLI's GitHub App install and is forwarded like any other command.
+#
+#   ./scripts/adamant              # API + worker, then the CLI
+#   ./scripts/adamant status       # forwarded to the CLI as /status
+#   ./scripts/adamant install owner/repo
+#   ./scripts/adamant down         # stop API/worker this launcher started
+#
+# The root package.json script "adamant" stays the CLI-only entry
+# (`pnpm --filter @adamant/cli start`). A second script with that name would
+# hide it.
+
+set -euo pipefail
+
+# Resolve via the real file so a PATH symlink still finds this checkout.
+resolve_source_dir() {
+  local source=$1
+  while [[ -L "$source" ]]; do
+    local dir
+    dir=$(cd -P "$(dirname "$source")" && pwd)
+    source=$(readlink "$source")
+    case $source in
+      /*) ;;
+      *) source=$dir/$source ;;
+    esac
+  done
+  cd -P "$(dirname "$source")" && pwd
+}
+
+SCRIPT_DIR=$(resolve_source_dir "${BASH_SOURCE[0]}")
+ROOT=$(cd -P "$SCRIPT_DIR/.." && pwd)
+SELF=$ROOT/scripts/adamant
+
+STATE=$ROOT/.adamant
+LOG_DIR=$STATE/logs
+API_LOG=$LOG_DIR/api.log
+WORKER_LOG=$LOG_DIR/worker.log
+API_PID=$STATE/api.pid
+WORKER_PID=$STATE/worker.pid
+API_PORT=8787
+API_URL=http://localhost:8787
+
+# Set only for processes this invocation spawned, so a failed start does not
+# stop an API or worker that was already running.
+started_api=0
+started_worker=0
+startup_done=0
+api_pid=
+worker_pid=
+started_pid=
+
+die() {
+  printf 'adamant: %s\n' "$1" >&2
+  exit 1
+}
+
+on_exit() {
+  local status=$?
+  # Startup failures only. Once the CLI is about to take the TTY, the API and
+  # worker stay up even if the CLI exits non-zero.
+  if [[ "$startup_done" -eq 0 && "$status" -ne 0 ]]; then
+    set +e
+    [[ "$started_api" -eq 1 ]] && stop_recorded API "$API_PID" api
+    [[ "$started_worker" -eq 1 ]] && stop_recorded worker "$WORKER_PID" worker
+  fi
+  exit "$status"
+}
+
+process_cwd() {
+  local pid=$1 line
+  # lsof -Fn prints `n` plus the path. The first one for `-d cwd` is the cwd.
+  while IFS= read -r line; do
+    case $line in
+      n*)
+        printf '%s\n' "${line#n}"
+        return 0
+        ;;
+    esac
+  done < <(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null)
+  return 1
+}
+
+process_args() {
+  ps -ww -p "$1" -o args= 2>/dev/null || true
+}
+
+# pid files are only written for processes we spawned. Matching the command
+# avoids killing a recycled pid; an empty cwd (lsof race) still counts.
+looks_like() {
+  local kind=$1 pid=$2 args cwd
+  args=$(process_args "$pid")
+  [[ -n "$args" ]] || return 1
+  case $kind in
+    worker)
+      case $args in
+        *dev:worker*|*"worker/index.ts"*) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    api)
+      case $args in
+        *dev:worker*|*"worker/index.ts"*) return 1 ;;
+        *api/index.ts*|*"@adamant/server dev"*) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+  cwd=$(process_cwd "$pid" || true)
+  case $cwd in
+    ""|"$ROOT"|"$ROOT"/server|"$ROOT"/server/*) return 0 ;;
+  esac
+  case $args in
+    *"$ROOT"*) return 0 ;;
+  esac
+  return 1
+}
+
+pidfile_is() {
+  local kind=$1 pidfile=$2 pid
+  [[ -f "$pidfile" ]] || return 1
+  pid=$(tr -d '[:space:]' <"$pidfile" || true)
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  looks_like "$kind" "$pid"
+}
+
+port_listening() {
+  # lsof sees IPv4 and IPv6 listeners. curl is the fallback when lsof is slow
+  # to notice a socket that is already answering /health.
+  if lsof -nP -iTCP:"$API_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    return 0
+  fi
+  curl -sf --max-time 1 -o /dev/null "$API_URL/health" 2>/dev/null
+}
+
+worker_running() {
+  local pid pids cwd
+  if pidfile_is worker "$WORKER_PID"; then
+    return 0
+  fi
+  # Another terminal may have started this checkout's worker without a pid file.
+  pids=$(pgrep -f 'worker/index\.ts' 2>/dev/null || true)
+  [[ -n "$pids" ]] || return 1
+  for pid in $pids; do
+    cwd=$(process_cwd "$pid" || true)
+    case $cwd in
+      "$ROOT"|"$ROOT"/server|"$ROOT"/server/*) ;;
+      *) continue ;;
+    esac
+    case $(process_args "$pid") in
+      *worker/index.ts*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+stop_recorded() {
+  local name=$1 pidfile=$2 kind=$3 pid i
+  [[ -f "$pidfile" ]] || return 0
+  pid=$(tr -d '[:space:]' <"$pidfile" || true)
+  if [[ ! "$pid" =~ ^[0-9]+$ ]] || [[ "$pid" -le 1 ]]; then
+    rm -f "$pidfile"
+    return 0
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$pidfile"
+    printf 'adamant: %s pid %s is not running\n' "$name" "$pid" >&2
+    return 0
+  fi
+  if ! looks_like "$kind" "$pid"; then
+    rm -f "$pidfile"
+    printf 'adamant: %s pid %s is a different process; left it running\n' "$name" "$pid" >&2
+    return 0
+  fi
+  # The recorded pid is the session leader (setsid). Its process group is the
+  # pnpm script and the node --watch child.
+  kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  i=0
+  while [[ "$i" -lt 25 ]]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pidfile"
+  printf 'adamant: stopped %s (pid %s)\n' "$name" "$pid" >&2
+}
+
+# Detach so the CLI's terminal session does not signal these long-lived processes.
+start_logged() {
+  local pidfile=$1 logfile=$2
+  shift 2
+  local old_umask
+  old_umask=$(umask)
+  umask 077
+  mkdir -p "$LOG_DIR"
+  chmod 700 "$STATE" "$LOG_DIR" || true
+  printf '\n----- %s %s -----\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$logfile"
+  if command -v perl >/dev/null 2>&1; then
+    perl -e 'use POSIX qw(setsid); setsid(); chdir(shift @ARGV) or die $!; exec @ARGV or die $!' \
+      "$ROOT" "$@" </dev/null >>"$logfile" 2>&1 &
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os, sys; os.setsid(); os.chdir(sys.argv[1]); os.execvp(sys.argv[2], sys.argv[2:])' \
+      "$ROOT" "$@" </dev/null >>"$logfile" 2>&1 &
+  else
+    umask "$old_umask"
+    die "perl or python3 is required to detach the API and worker from this terminal"
+  fi
+  started_pid=$!
+  umask "$old_umask"
+  disown "$started_pid" >/dev/null 2>&1 || true
+  printf '%s\n' "$started_pid" >"$pidfile"
+}
+
+wait_for_health() {
+  local deadline body
+  deadline=$((SECONDS + 30))
+  while [[ "$SECONDS" -le "$deadline" ]]; do
+    body=$(curl -sf --max-time 2 "$API_URL/health" 2>/dev/null || true)
+    if [[ "$body" == '{"status":"ok"}' ]]; then
+      return 0
+    fi
+    if [[ "$started_api" -eq 1 ]] && ! kill -0 "$api_pid" 2>/dev/null; then
+      return 1
+    fi
+    sleep 0.4
+  done
+  return 1
+}
+
+wait_for_worker() {
+  local offset=$1 deadline chunk
+  deadline=$((SECONDS + 30))
+  while [[ "$SECONDS" -le "$deadline" ]]; do
+    if [[ -f "$WORKER_LOG" ]]; then
+      # Only bytes written after this start, so an older ready line does not count.
+      chunk=$(tail -c +$((offset + 1)) "$WORKER_LOG" 2>/dev/null || true)
+      case $chunk in
+        *"@adamant/worker connected and waiting for jobs"*) return 0 ;;
+      esac
+    fi
+    if [[ -n "$worker_pid" ]] && ! kill -0 "$worker_pid" 2>/dev/null; then
+      return 1
+    fi
+    sleep 0.4
+  done
+  return 1
+}
+
+ensure_api() {
+  if port_listening; then
+    printf 'adamant: API already listening on port %s\n' "$API_PORT" >&2
+    if ! wait_for_health; then
+      die "Port ${API_PORT} is accepting connections, but ${API_URL}/health did not return {\"status\":\"ok\"} within 30s."
+    fi
+    return 0
+  fi
+  start_logged "$API_PID" "$API_LOG" env -u ADAMANT_SESSION pnpm --filter @adamant/server dev
+  started_api=1
+  api_pid=$started_pid
+  printf 'adamant: started API (pid %s). Log: %s\n' "$api_pid" "$API_LOG" >&2
+  if ! wait_for_health; then
+    die "API did not become healthy within 30s. Log: $API_LOG"
+  fi
+}
+
+ensure_worker() {
+  if worker_running; then
+    printf 'adamant: worker already running for this checkout\n' >&2
+    return 0
+  fi
+  local offset=0
+  if [[ -f "$WORKER_LOG" ]]; then
+    offset=$(wc -c <"$WORKER_LOG" | tr -d '[:space:]')
+    [[ "$offset" =~ ^[0-9]+$ ]] || offset=0
+  fi
+  start_logged "$WORKER_PID" "$WORKER_LOG" env -u ADAMANT_SESSION pnpm --filter @adamant/server dev:worker
+  started_worker=1
+  worker_pid=$started_pid
+  printf 'adamant: started worker (pid %s). Log: %s\n' "$worker_pid" "$WORKER_LOG" >&2
+  if ! wait_for_worker "$offset"; then
+    die "Worker did not become ready within 30s. Log: $WORKER_LOG"
+  fi
+}
+
+ensure_session() {
+  if [[ -n ${ADAMANT_SESSION:-} ]]; then
+    printf 'adamant: using ADAMANT_SESSION from the environment\n' >&2
+    return 0
+  fi
+  local err token
+  err=$(mktemp "${TMPDIR:-/tmp}/adamant-session.XXXXXX")
+  # stdout is only the token. Keep it in a variable; stderr is the non-secret note.
+  if ! token=$(
+    cd "$ROOT" && pnpm --silent --filter @adamant/server session:create 2>"$err"
+  ); then
+    printf 'adamant: could not mint a CLI session.\n' >&2
+    cat "$err" >&2
+    rm -f "$err"
+    exit 1
+  fi
+  rm -f "$err"
+  case $token in
+    *[!A-Za-z0-9_-]* | "")
+      die "session:create did not return a usable token."
+      ;;
+  esac
+  # Unexported here. The CLI subshell exports it so the API and worker never see it.
+  ADAMANT_SESSION=$token
+  printf 'adamant: minted a CLI session\n' >&2
+}
+
+print_still_up() {
+  printf 'API and worker are still running. Stop processes this launcher started with: %s down\n' "$SELF" >&2
+}
+
+dir_on_path() {
+  local want=$1
+  [[ -d "$want" ]] || return 1
+  local cwant
+  cwant=$(cd -P "$want" && pwd) || return 1
+  (
+    local IFS=: dir cdir
+    set -f
+    for dir in $PATH; do
+      [[ -n "$dir" && -d "$dir" ]] || continue
+      cdir=$(cd -P "$dir" && pwd) || continue
+      [[ "$cdir" == "$cwant" ]] && exit 0
+    done
+    exit 1
+  )
+}
+
+same_launcher() {
+  local path=$1 target
+  [[ -e "$path" || -L "$path" ]] || return 1
+  if [[ -L "$path" ]]; then
+    target=$(readlink "$path")
+    case $target in
+      /*) ;;
+      *) target=$(cd -P "$(dirname "$path")" && pwd)/$target ;;
+    esac
+  else
+    target=$path
+  fi
+  [[ "$target" == "$SELF" ]]
+}
+
+pick_bindir() {
+  local candidate=$HOME/.local/bin pnpm_bin dir
+  if dir_on_path "$candidate" && [[ -d "$candidate" && -w "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  if command -v pnpm >/dev/null 2>&1; then
+    pnpm_bin=$(pnpm bin -g 2>/dev/null || true)
+    if [[ -n "$pnpm_bin" && "$pnpm_bin" != undefined && -d "$pnpm_bin" && -w "$pnpm_bin" ]] &&
+      dir_on_path "$pnpm_bin"; then
+      printf '%s\n' "$pnpm_bin"
+      return 0
+    fi
+  fi
+  (
+    local IFS=:
+    set -f
+    for dir in $PATH; do
+      [[ -n "$dir" && -d "$dir" && -w "$dir" ]] || continue
+      case $dir in
+        "$HOME"/*)
+          printf '%s\n' "$dir"
+          exit 0
+          ;;
+      esac
+    done
+    exit 1
+  )
+}
+
+cmd_install() {
+  local existing dest_dir dest
+  existing=$(command -v adamant 2>/dev/null || true)
+  if [[ -n "$existing" ]]; then
+    if same_launcher "$existing"; then
+      printf 'adamant: already on PATH at %s\n' "$existing"
+      return 0
+    fi
+    printf 'adamant: the name adamant is already %s.\n' "$existing" >&2
+    printf 'adamant: left that command in place. This launcher is %s\n' "$SELF" >&2
+    return 1
+  fi
+  dest_dir=$(pick_bindir) || die "No writable directory on PATH. Run $SELF"
+  dest=$dest_dir/adamant
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    if same_launcher "$dest"; then
+      printf 'adamant: already installed at %s\n' "$dest"
+      return 0
+    fi
+    printf 'adamant: %s exists. This launcher is %s\n' "$dest" "$SELF" >&2
+    return 1
+  fi
+  ln -s "$SELF" "$dest"
+  printf 'adamant: linked %s -> %s\n' "$dest" "$SELF"
+}
+
+cmd_down() {
+  local had=0
+  if [[ -f "$API_PID" ]]; then
+    had=1
+    stop_recorded API "$API_PID" api
+  fi
+  if [[ -f "$WORKER_PID" ]]; then
+    had=1
+    stop_recorded worker "$WORKER_PID" worker
+  fi
+  if [[ "$had" -eq 0 ]]; then
+    printf 'adamant: no pid files in %s. Processes this launcher did not start were left running.\n' "$STATE" >&2
+  fi
+}
+
+launch_cli() {
+  # exec inside the subshell so the CLI owns the TTY. The parent stays alive
+  # only to print the still-up note; it does not keep the servers as children
+  # of the terminal's foreground group (they were started with setsid).
+  if [[ $# -eq 0 ]]; then
+    exec pnpm --filter @adamant/cli start
+  fi
+  exec pnpm --filter @adamant/cli start -- "$@"
+}
+
+cmd_up() {
+  local status=0
+  # A login shell with huponexit would signal jobs it still tracks. The API and
+  # worker are setsid'd; this keeps the script from signalling them on the way out.
+  shopt -u huponexit
+  trap on_exit EXIT
+  command -v pnpm >/dev/null 2>&1 || die "pnpm is required on PATH"
+  command -v curl >/dev/null 2>&1 || die "curl is required to check ${API_URL}/health"
+  command -v lsof >/dev/null 2>&1 || die "lsof is required to see whether port ${API_PORT} or the worker is already running"
+
+  ensure_api
+  ensure_worker
+
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    startup_done=1
+    printf 'adamant: the CLI needs an interactive terminal.\n' >&2
+    print_still_up
+    exit 1
+  fi
+
+  ensure_session
+  startup_done=1
+  set +e
+  (
+    cd "$ROOT" || exit 1
+    export ADAMANT_SESSION
+    export ADAMANT_API_URL="$API_URL"
+    launch_cli "$@"
+  )
+  status=$?
+  set -e
+  print_still_up
+  exit "$status"
+}
+
+main() {
+  local cmd=${1:-}
+  case $cmd in
+    install)
+      # No arguments: link this launcher onto PATH. owner/repo is the CLI
+      # command that opens the GitHub App install page.
+      if [[ $# -eq 1 ]]; then
+        cmd_install
+      else
+        cmd_up "$@"
+      fi
+      ;;
+    down)
+      [[ $# -eq 1 ]] || die "usage: $SELF down"
+      cmd_down
+      ;;
+    *)
+      cmd_up "$@"
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

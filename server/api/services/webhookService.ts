@@ -41,6 +41,12 @@ type EventPayload = {
   repository?: RepositoryPayload
   /** `installation` events list repos here, not on `repository`. */
   repositories?: RepositoryPayload[]
+  /**
+   * `installation_repositories` lists the change here. `removed` is not
+   * applied: dropping a repo from the installation must not delete the row.
+   */
+  repositories_added?: RepositoryPayload[]
+  repositories_removed?: RepositoryPayload[]
   workflow_run?: {
     conclusion?: string
     head_sha?: string
@@ -113,6 +119,9 @@ export function createWebhookService(deps: WebhookDependencies) {
     const listed = [
       ...(payload.repository ? [payload.repository] : []),
       ...(payload.repositories ?? []),
+      // `added` is the only action that names new repos. `removed` stays stored
+      // so a later failure on that repo can still heal; this event never starts one.
+      ...(payload.action === 'added' ? (payload.repositories_added ?? []) : []),
     ]
     const seen = new Set<number>()
     let primaryRowId: string | null = null
@@ -206,6 +215,11 @@ export function createWebhookService(deps: WebhookDependencies) {
         return handleWorkflowRun(store, deliveryId, payload, repositoryRowId)
       case 'pull_request':
         return handlePullRequest(store, deliveryId, payload, repositoryRowId)
+      case 'installation':
+      case 'installation_repositories':
+      case 'ping':
+        // The delivery row already stores `event`. Repos were upserted in bind().
+        return null
       default:
         return null
     }

@@ -21,9 +21,12 @@ How to build it: [tasks.md](tasks.md). Wiring:
 ## How the GitHub App works
 
 1. Create a GitHub App. Install it on the eval repo (contents + PRs + Actions).
-2. Subscribe to `workflow_run` and `pull_request`. Webhook URL → the
-   **hosted** API (`/webhooks/github`). Use smee/ngrok only when developing
-   the API on a laptop.
+2. Subscribe to `workflow_run`, `pull_request`, `installation`, and
+   `installation_repositories`. Webhook URL → the **hosted** API
+   (`/webhooks/github`). Use smee/ngrok only when developing the API on a
+   laptop. Adding a repository to an existing installation is an
+   `installation_repositories` event with action `added`; that writes the
+   `repositories` row. `removed` does not delete it.
 3. Host API + worker + Postgres and leave them running.
 4. On **failed** `workflow_run` → create a run, heal, merge **our** PR.
 5. On **merged** `pull_request` → if it is our heal, mark the run `succeeded`.
@@ -41,10 +44,16 @@ server.
 
 ```
 adamant status              # hosted API up?
+adamant install <owner>/<repo>  # open the App install page; wait until the repo is bound
 adamant runs                # list runs
 adamant run <id>            # one run + audit
 adamant watch               # stay connected: live feed
 ```
+
+`install` asks the hosted API for the public GitHub App URL and polls until
+that exact repository is in Postgres. The CLI does not hold `GITHUB_APP_SLUG`,
+a private key, or an installation token. Confirmation is the webhook-written
+`repositories` row.
 
 `watch` opens a long-lived SSE (or reconnecting poll) to
 `GET /activity` on the hosted API. Close the terminal and the backend

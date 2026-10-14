@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 import { AdamantApi } from '../../cli/src/api.ts'
 import { loadCliConfig } from '../../cli/src/config.ts'
 import { CommandController, formatActivity } from '../../cli/src/controller.ts'
+import { browserOpenCommand } from '../../cli/src/open.ts'
 
 const run = {
   id: '6611607f-117c-486e-9432-1bec481efacb',
@@ -97,6 +98,132 @@ describe('Adamant CLI commands against the API', () => {
 
     assert.equal(failed?.tone, 'error')
     assert.match(failed?.text ?? '', /run\.failed {2}OPENAI_API_KEY is required in the worker$/)
+  })
+})
+
+describe('/install', () => {
+  const installUrl = 'https://github.com/apps/adamant/installations/new'
+
+  function installController(options: {
+    install?: () => Response
+    status?: () => Response
+    openUrl?: (url: string) => Promise<boolean>
+    pollIntervalMs?: number
+  }) {
+    const api = new AdamantApi(
+      loadCliConfig({ ADAMANT_API_URL: 'https://adamant.example', ADAMANT_SESSION: 's' }),
+      async (input) => {
+        const url = new URL(String(input))
+        if (url.pathname === '/github/install') {
+          return options.install?.() ?? Response.json({ url: installUrl })
+        }
+        if (url.pathname === '/github/installations/status') {
+          return options.status?.() ?? Response.json({ error: 'missing' }, { status: 404 })
+        }
+        return Response.json({ error: 'unexpected' }, { status: 500 })
+      },
+    )
+    return new CommandController(api, {
+      pollIntervalMs: options.pollIntervalMs ?? 0,
+      openUrl: options.openUrl ?? (async () => true),
+    })
+  }
+
+  it('prints the URL, asks for that repository, and reports the default branch', async () => {
+    const opened: string[] = []
+    let polls = 0
+    const controller = installController({
+      openUrl: async (url) => {
+        opened.push(url)
+        return true
+      },
+      status: () => {
+        polls += 1
+        return polls < 2
+          ? Response.json({ error: 'not yet' }, { status: 404 })
+          : Response.json({ owner: 'acme', name: 'eval', defaultBranch: 'main' })
+      },
+    })
+
+    const lines = await texts(controller, '/install acme/eval')
+    const text = lines.map((entry) => entry.text).join('\n')
+
+    assert.deepEqual(opened, [installUrl])
+    assert.equal(polls, 2)
+    assert.match(text, new RegExp(installUrl.replaceAll('.', '\\.')))
+    assert.match(
+      text,
+      /Install the App on acme\/eval, or add acme\/eval to an existing installation/,
+    )
+    assert.match(text, /Waiting for GitHub to confirm acme\/eval/)
+    assert.match(text, /Adamant is installed on acme\/eval/)
+    assert.match(text, /Default branch: main/)
+    assert.match(text, /A failed workflow on main starts a heal/)
+  })
+
+  it('keeps going when the browser cannot be opened', async () => {
+    const controller = installController({
+      openUrl: async () => {
+        throw new Error('no display')
+      },
+      status: () => Response.json({ owner: 'acme', name: 'eval', defaultBranch: 'develop' }),
+    })
+
+    const lines = await texts(controller, '/install acme/eval')
+    const text = lines.map((entry) => entry.text).join('\n')
+
+    assert.match(text, /Could not open a browser/)
+    assert.match(text, /Default branch: develop/)
+  })
+
+  it('stops polling when the user aborts', async () => {
+    const abort = new AbortController()
+    let polls = 0
+    const controller = installController({
+      pollIntervalMs: 1_000,
+      openUrl: async () => {
+        abort.abort()
+        return true
+      },
+      status: () => {
+        polls += 1
+        return Response.json({ error: 'not yet' }, { status: 404 })
+      },
+    })
+
+    const result = await controller.execute('/install acme/eval', abort.signal)
+    assert.equal(result.kind, 'output')
+    const lines = result.kind === 'output' ? result.lines : []
+    assert.equal(polls, 0)
+    assert.match(lines.map((entry) => entry.text).join('\n'), /Stopped waiting for acme\/eval/)
+  })
+
+  it('says the App slug is not configured instead of opening a browser', async () => {
+    let opened = false
+    const controller = installController({
+      install: () =>
+        Response.json({ error: 'The GitHub App slug is not configured.' }, { status: 503 }),
+      openUrl: async () => {
+        opened = true
+        return true
+      },
+    })
+
+    await assert.rejects(controller.execute('/install acme/eval'), /App slug is not configured/)
+    assert.equal(opened, false)
+  })
+})
+
+describe('browser opener', () => {
+  const url = 'https://github.com/apps/adamant/installations/new'
+
+  it('picks a platform opener without a shell', () => {
+    assert.deepEqual(browserOpenCommand('darwin', url), { command: 'open', args: [url] })
+    assert.deepEqual(browserOpenCommand('linux', url), { command: 'xdg-open', args: [url] })
+    assert.deepEqual(browserOpenCommand('win32', url), {
+      command: 'cmd',
+      args: ['/c', 'start', '', url],
+    })
   })
 })
 

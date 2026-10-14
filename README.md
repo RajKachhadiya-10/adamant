@@ -48,17 +48,17 @@ Every tool call the agent made is on `tool_invocations` and `audit_events`, keye
 
 The heal loop runs on the hosted API and worker ([docs/tasks.md](docs/tasks.md)).
 
-| Piece                                                                  | State                                                 |
-| ---------------------------------------------------------------------- | ----------------------------------------------------- |
-| Webhooks → `runs` in Postgres, dedupe by delivery id                   | Implemented                                           |
-| Worker + heal graph (triage → diagnose → patch → sandbox → PR → merge) | Implemented                                           |
-| Docker sandbox runner                                                  | Implemented                                           |
-| `POST /runs`, `GET /runs`, `GET /runs/:id`                             | Implemented                                           |
-| GitHub and Google OAuth, sessions, `GET /auth/me`                      | Implemented in the API; the Electron app has no login |
-| `GET /activity` SSE feed                                               | Implemented                                           |
-| `@adamant/cli` (`status`, `runs`, `run <id>`, `watch`, `trigger`)      | Implemented                                           |
-| Electron app                                                           | Shell only; healing does not run from it              |
-| Human-in-the-loop approval before merge                                | Later                                                 |
+| Piece                                                                        | State                                                 |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Webhooks → `runs` in Postgres, dedupe by delivery id                         | Implemented                                           |
+| Worker + heal graph (triage → diagnose → patch → sandbox → PR → merge)       | Implemented                                           |
+| Docker sandbox runner                                                        | Implemented                                           |
+| `POST /runs`, `GET /runs`, `GET /runs/:id`                                   | Implemented                                           |
+| GitHub and Google OAuth, sessions, `GET /auth/me`                            | Implemented in the API; the Electron app has no login |
+| `GET /activity` SSE feed                                                     | Implemented                                           |
+| `@adamant/cli` (`status`, `install`, `runs`, `run <id>`, `watch`, `trigger`) | Implemented                                           |
+| Electron app                                                                 | Shell only; healing does not run from it              |
+| Human-in-the-loop approval before merge                                      | Later                                                 |
 
 ## Quick start
 
@@ -107,9 +107,16 @@ pnpm adamant
 
 Until the API is hosted, the CLI defaults to `http://localhost:8787`. Set `ADAMANT_API_URL` to point
 it elsewhere; it must be an HTTPS origin, except `localhost` development URLs. Start
-with `pnpm adamant status`, `pnpm adamant runs`, `pnpm adamant run <id>`, or `pnpm adamant watch`
-to execute the same command in the interactive interface. `status` checks the session as well as
-the API, so it is the first thing to run when other commands fail.
+with `pnpm adamant status`, `pnpm adamant install <owner>/<repo>`, `pnpm adamant runs`,
+`pnpm adamant run <id>`, or `pnpm adamant watch` to execute the same command in the interactive
+interface. `status` checks the session as well as the API, so it is the first thing to run when
+other commands fail.
+
+`install` prints the GitHub App install URL and waits until that exact repository is in Postgres.
+The CLI does not know `GITHUB_APP_SLUG` and never receives an installation token: the API builds
+`https://github.com/apps/<slug>/installations/new`, and only the webhook writes the `repositories`
+row. Install the App on that owner/repo, or add the repository to an existing installation. Esc
+stops the wait.
 
 To run it as `adamant` from any directory, link it once after `pnpm install`. The link points at
 this checkout, so source changes apply without a rebuild.
@@ -147,6 +154,7 @@ act on a repo, and the worker can do the work but never sees a user session.
 | `DATABASE_URL`                                       | API, worker, drizzle | Postgres connection string                                          |
 | `PORT`                                               | API                  | HTTP port, default `8787`                                           |
 | `GITHUB_WEBHOOK_SECRET`                              | API                  | HMAC on every delivery; a bad signature is a 401 and stores nothing |
+| `GITHUB_APP_SLUG`                                    | API                  | Public App slug for the install URL; not a credential               |
 | `GITHUB_OAUTH_CLIENT_ID`, `_SECRET`, `_REDIRECT_URI` | API                  | Enables `GET /auth/github`; all three or the provider stays off     |
 | `GOOGLE_OAUTH_CLIENT_ID`, `_SECRET`, `_REDIRECT_URI` | API                  | Same, for `GET /auth/google`                                        |
 | `ADAMANT_SESSION_SECRET`, `ADAMANT_SEED_USER_ID`     | API                  | Seeded session used only when `DATABASE_URL` is unset               |
@@ -160,22 +168,26 @@ needs `pnpm --filter @adamant/server dev` with them in the environment.
 
 ## HTTP API
 
-| Route                                | Auth                  | Does                                              |
-| ------------------------------------ | --------------------- | ------------------------------------------------- |
-| `GET /health`                        | none                  | Liveness for infra checks                         |
-| `POST /webhooks/github`              | `X-Hub-Signature-256` | Store the delivery; a failed build starts one run |
-| `GET /auth/{github,google}`          | none                  | Start OAuth; state is bound to a cookie           |
-| `GET /auth/{github,google}/callback` | OAuth state           | Sets the `adamant_session` httpOnly cookie        |
-| `GET /auth/me`, `POST /auth/logout`  | session               | Current user; revoke the session                  |
-| `POST /runs`                         | session               | Start a run; needs an `Idempotency-Key`           |
-| `GET /runs`, `GET /runs/:id`         | session               | List runs; one run with its audit trail           |
-| `GET /activity`                      | session               | Server-Sent Event feed for `adamant watch`        |
+| Route                                | Auth                  | Does                                                    |
+| ------------------------------------ | --------------------- | ------------------------------------------------------- |
+| `GET /health`                        | none                  | Liveness for infra checks                               |
+| `POST /webhooks/github`              | `X-Hub-Signature-256` | Store the delivery; a failed build starts one run       |
+| `GET /auth/{github,google}`          | none                  | Start OAuth; state is bound to a cookie                 |
+| `GET /auth/{github,google}/callback` | OAuth state           | Sets the `adamant_session` httpOnly cookie              |
+| `GET /auth/me`, `POST /auth/logout`  | session               | Current user; revoke the session                        |
+| `POST /runs`                         | session               | Start a run; needs an `Idempotency-Key`                 |
+| `GET /runs`, `GET /runs/:id`         | session               | List runs; one run with its audit trail                 |
+| `GET /activity`                      | session               | Server-Sent Event feed for `adamant watch`              |
+| `GET /github/install`                | session               | Public install URL from `GITHUB_APP_SLUG`; 503 if unset |
+| `GET /github/installations/status`   | session               | Whether that exact owner/name is in `repositories`      |
 
 A session arrives as the `adamant_session` cookie, an `Authorization: Bearer` header, or an
 `ADAMANT_SESSION` header, never in the URL (query strings end up in access logs). The CLI sends
 `Authorization: Bearer`, because proxies such as nginx drop header names with underscores.
-`/auth/*` and the Postgres-backed runs router mount only when `DATABASE_URL` is set; without it the
-API falls back to the seeded session, and `/runs` keeps the same contract over an in-memory store.
+`/auth/*` and the Postgres-backed install and runs routers mount only when `DATABASE_URL` is set.
+Without it, `/github/install` and `/github/installations/status` answer that install confirmation
+needs the hosted API with Postgres, and they do not read the in-memory schema maps. `/runs` keeps
+the same contract over an in-memory store.
 The remaining schema tables are also exposed as CRUD routes behind the same auth, for development.
 
 `/activity` LISTENs on Postgres (`adamant_activity`, notified by insert triggers on `audit_events`
@@ -209,11 +221,13 @@ Backend scripts run through `pnpm --filter @adamant/server <script>`:
 | `db:studio`                  | Drizzle Studio against `DATABASE_URL`        |
 | `session:create [username]`  | Print a new CLI session (default user `cli`) |
 
-Inside the CLI, use `/help`, `/status`, `/runs`, `/run <id>`, `/watch`, or
-`/trigger <repositoryId> <fullSha>`. `/clear` and `/quit` manage the local interface. Tab
-completes a command and Enter runs the highlighted suggestion, so `/st` Enter runs `/status`.
+Inside the CLI, type `/` for the command list: `/help`, `/status`, `/install`, `/runs`, `/run`,
+`/watch`, `/trigger`, and `/clear`. `/install` takes `owner/repo`. `/run` takes a run id.
+`/trigger` takes a repository id and a full commit SHA. Tab completes a command and Enter runs
+the highlighted suggestion, so `/st` Enter runs `/status`.
 Up/Down move through suggestions; with an empty prompt, Up/Down or `j`/`k` select a row from
-`/runs` and Enter opens it. PgUp/PgDn scroll the output; Esc clears the prompt; Ctrl+L clears
+`/runs` and Enter opens it. PgUp/PgDn scroll the output; Esc clears the prompt, or stops
+`/install` while it is waiting; Ctrl+L clears
 output; Ctrl+C exits. `/watch` resumes its SSE stream with `Last-Event-ID` after a dropped
 connection, reconnects a stream that has been silent for 45 s, and stops with a message when the
 session is refused.

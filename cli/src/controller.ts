@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { type AuditEvent, type RunSummary } from '@adamant/contract'
+import { type AuditEvent, type GithubInstallationStatus, type RunSummary } from '@adamant/contract'
 import { type AdamantApi } from './api.ts'
 import { commandDefinitions, parseCommand } from './commands.ts'
+import { openInstallUrl } from './open.ts'
 import { followActivity, type ActivityEvent, type FollowActivityOptions } from './sse.ts'
 
 export type OutputLine = {
@@ -13,10 +14,24 @@ export type OutputLine = {
 }
 
 export type CommandResult =
-  | { kind: 'output'; lines: readonly OutputLine[]; runs?: readonly RunSummary[] }
+  | {
+      kind: 'output'
+      lines: readonly OutputLine[]
+      runs?: readonly RunSummary[]
+      /** Set when `emit` already showed `lines`, so the interface does not print them twice. */
+      streamed?: boolean
+    }
   | { kind: 'watch' }
   | { kind: 'clear' }
-  | { kind: 'quit' }
+
+export type CommandControllerOptions = {
+  /** Tests pass a fake so `/install` never launches a browser. */
+  openUrl?: (url: string) => Promise<boolean>
+  /** Delay between status polls. About two seconds in the product. */
+  pollIntervalMs?: number
+}
+
+const DEFAULT_POLL_INTERVAL_MS = 2_000
 
 function line(tone: OutputLine['tone'], text: string, runId?: string): OutputLine {
   return { id: randomUUID(), tone, text, ...(runId ? { runId } : {}) }
@@ -99,12 +114,20 @@ function auditLine(event: AuditEvent): OutputLine {
 
 export class CommandController {
   private readonly api: AdamantApi
+  private readonly openUrl: (url: string) => Promise<boolean>
+  private readonly pollIntervalMs: number
 
-  constructor(api: AdamantApi) {
+  constructor(api: AdamantApi, options: CommandControllerOptions = {}) {
     this.api = api
+    this.openUrl = options.openUrl ?? openInstallUrl
+    this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS
   }
 
-  async execute(input: string, signal?: AbortSignal): Promise<CommandResult> {
+  async execute(
+    input: string,
+    signal?: AbortSignal,
+    emit?: (lines: readonly OutputLine[]) => void,
+  ): Promise<CommandResult> {
     const command = parseCommand(input)
     switch (command.name) {
       case 'help':
@@ -113,12 +136,14 @@ export class CommandController {
           lines: [
             line('accent', 'Adamant commands'),
             ...commandDefinitions.map((definition) =>
-              line('muted', `${definition.usage.padEnd(38)} ${definition.description}`),
+              line('muted', `${`/${definition.name}`.padEnd(12)}${definition.description}`),
             ),
           ],
         }
       case 'status':
         return { kind: 'output', lines: await this.status(signal) }
+      case 'install':
+        return this.install(command.owner, command.repo, signal, emit)
       case 'runs': {
         const runs = await this.api.listRuns(signal)
         return {
@@ -169,8 +194,6 @@ export class CommandController {
         return { kind: 'watch' }
       case 'clear':
         return { kind: 'clear' }
-      case 'quit':
-        return { kind: 'quit' }
     }
   }
 
@@ -201,4 +224,106 @@ export class CommandController {
   followActivity(options: FollowActivityOptions): Promise<void> {
     return followActivity(this.api, options)
   }
+
+  private async install(
+    owner: string,
+    repo: string,
+    signal?: AbortSignal,
+    emit?: (lines: readonly OutputLine[]) => void,
+  ): Promise<CommandResult> {
+    const lines: OutputLine[] = []
+    const push = (batch: readonly OutputLine[]) => {
+      lines.push(...batch)
+      emit?.(batch)
+    }
+    const finish = (): CommandResult => ({
+      kind: 'output',
+      lines,
+      ...(emit ? { streamed: true } : {}),
+    })
+    const label = `${owner}/${repo}`
+    if (signal?.aborted) {
+      push([line('muted', `Stopped waiting for ${label}.`)])
+      return finish()
+    }
+
+    const url = await this.api.installUrl(signal)
+    push([
+      line('normal', url),
+      line('muted', `Install the App on ${label}, or add ${label} to an existing installation.`),
+    ])
+
+    let opened = false
+    try {
+      opened = await this.openUrl(url)
+    } catch {
+      // A missing display or a failed opener must not fail the command.
+    }
+    if (signal?.aborted) {
+      push([line('muted', `Stopped waiting for ${label}.`)])
+      return finish()
+    }
+    if (!opened) push([line('muted', 'Could not open a browser. Open the URL above.')])
+    push([line('muted', `Waiting for GitHub to confirm ${label}…`)])
+
+    let installed: GithubInstallationStatus | null = null
+    while (!installed) {
+      if (signal?.aborted) {
+        push([line('muted', `Stopped waiting for ${label}.`)])
+        return finish()
+      }
+      try {
+        installed = await this.api.installationStatus(owner, repo, signal)
+      } catch (error) {
+        if (isAbort(error) || signal?.aborted) {
+          push([line('muted', `Stopped waiting for ${label}.`)])
+          return finish()
+        }
+        throw error
+      }
+      if (installed) break
+      try {
+        await delay(this.pollIntervalMs, signal)
+      } catch (error) {
+        if (isAbort(error) || signal?.aborted) {
+          push([line('muted', `Stopped waiting for ${label}.`)])
+          return finish()
+        }
+        throw error
+      }
+    }
+
+    push([
+      line('success', `Adamant is installed on ${installed.owner}/${installed.name}.`),
+      line('success', `Default branch: ${installed.defaultBranch}.`),
+      line('muted', `A failed workflow on ${installed.defaultBranch} starts a heal.`),
+    ])
+    return finish()
+  }
+}
+
+function isAbort(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError(signal))
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(abortError(signal))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function abortError(signal: AbortSignal | undefined): DOMException {
+  const reason = signal?.reason
+  return reason instanceof DOMException && reason.name === 'AbortError'
+    ? reason
+    : new DOMException('The operation was aborted.', 'AbortError')
 }

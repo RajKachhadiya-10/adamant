@@ -1,6 +1,10 @@
 import {
+  GithubInstallationStatusSchema,
+  GithubInstallUrlSchema,
+  INSTALL_CONFIRMATION_NEEDS_DATABASE,
   RunDetailSchema,
   RunSummarySchema,
+  type GithubInstallationStatus,
   type RunDetail,
   type RunSummary,
 } from '@adamant/contract'
@@ -93,6 +97,38 @@ export class AdamantApi {
     return this.parse(response, RunDetailSchema, 'GET /runs/:id')
   }
 
+  async installUrl(signal?: AbortSignal): Promise<string> {
+    // 404 here is "this API has no install route", which is how a database-free
+    // process used to look. 404 on the status route means "not installed yet".
+    const response = await this.request('GET', '/github/install', {
+      signal,
+      allowStatuses: [404],
+    })
+    if (response.status === 404) {
+      await response.body?.cancel().catch(() => undefined)
+      throw new ApiError(INSTALL_CONFIRMATION_NEEDS_DATABASE, 404)
+    }
+    return (await this.parse(response, GithubInstallUrlSchema, 'GET /github/install')).url
+  }
+
+  /** Null when this owner and name are not in Postgres yet. Any other failure throws. */
+  async installationStatus(
+    owner: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<GithubInstallationStatus | null> {
+    const query = new URLSearchParams({ owner, name })
+    const response = await this.request('GET', `/github/installations/status?${query.toString()}`, {
+      signal,
+      allowStatuses: [404],
+    })
+    if (response.status === 404) {
+      await response.body?.cancel().catch(() => undefined)
+      return null
+    }
+    return this.parse(response, GithubInstallationStatusSchema, 'GET /github/installations/status')
+  }
+
   async createRun(
     input: { repositoryId: string; sourceSha: string; idempotencyKey: string },
     signal?: AbortSignal,
@@ -141,6 +177,8 @@ export class AdamantApi {
       timeout?: boolean
       headers?: Record<string, string>
       body?: string
+      /** Statuses the caller handles. 404 on install status means "not bound yet". */
+      allowStatuses?: readonly number[]
     },
   ): Promise<Response> {
     const signals = [
@@ -165,7 +203,7 @@ export class AdamantApi {
     } catch (error) {
       throw this.describeFailure(error)
     }
-    if (response.ok) return response
+    if (response.ok || options.allowStatuses?.includes(response.status)) return response
 
     const body: unknown = await response.json().catch(() => null)
     if (response.status === 401) {

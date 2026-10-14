@@ -80,10 +80,10 @@ Eval repo: App may merge (contents + pull-requests write; no blocking reviews fo
 
 ### 5. CLI
 
-| ID  | Who | Task                                                  | Done when                                       |
-| --- | --- | ----------------------------------------------------- | ----------------------------------------------- |
-| 5.1 | R3  | Hosted `GET /activity` SSE (deliveries + audit)       | Done: remote CLI can stay connected             |
-| 5.2 | R3  | `@adamant/cli`: `status`, `runs`, `run <id>`, `watch` | Done: CLI against the **hosted** URL shows feed |
+| ID  | Who | Task                                                                            | Done when                                       |
+| --- | --- | ------------------------------------------------------------------------------- | ----------------------------------------------- |
+| 5.1 | R3  | Hosted `GET /activity` SSE (deliveries + audit)                                 | Done: remote CLI can stay connected             |
+| 5.2 | R3  | `@adamant/cli`: `status`, `runs`, `run <id>`, `watch`, `install <owner>/<repo>` | Done: CLI against the **hosted** URL shows feed |
 
 CLI env: `ADAMANT_API_URL` (hosted origin) + `ADAMANT_SESSION`. Nothing
 else. `watch` is a long-lived SSE to that origin.

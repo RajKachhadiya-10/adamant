@@ -129,4 +129,49 @@ describe('Adamant API client', () => {
     assert.ok(response.body)
     assert.notEqual(signal?.aborted, true)
   })
+
+  it('loads the public install URL and treats a missing route as no database', async () => {
+    let request: Request | undefined
+    const api = new AdamantApi(config, async (input, init) => {
+      request = new Request(input, init)
+      return Response.json({ url: 'https://github.com/apps/adamant/installations/new' })
+    })
+
+    assert.equal(await api.installUrl(), 'https://github.com/apps/adamant/installations/new')
+    assert.equal(request?.headers.get('Authorization'), 'Bearer session-secret')
+    assert.equal(new URL(request?.url ?? '').pathname, '/github/install')
+
+    const missing = new AdamantApi(config, async () => new Response('no', { status: 404 }))
+    await assert.rejects(missing.installUrl(), /hosted API with Postgres/)
+  })
+
+  it('polls one repository and does not treat 404 as a finished install', async () => {
+    let request: Request | undefined
+    const api = new AdamantApi(config, async (input, init) => {
+      request = new Request(input, init)
+      return Response.json({ owner: 'acme', name: 'eval', defaultBranch: 'develop' })
+    })
+
+    assert.deepEqual(await api.installationStatus('acme', 'eval'), {
+      owner: 'acme',
+      name: 'eval',
+      defaultBranch: 'develop',
+    })
+    const url = new URL(request?.url ?? '')
+    assert.equal(url.pathname, '/github/installations/status')
+    assert.equal(url.searchParams.get('owner'), 'acme')
+    assert.equal(url.searchParams.get('name'), 'eval')
+
+    const waiting = new AdamantApi(config, async () =>
+      Response.json({ error: 'Adamant is not installed on this repository.' }, { status: 404 }),
+    )
+    assert.equal(await waiting.installationStatus('acme', 'eval'), null)
+  })
+
+  it('refuses an install URL that is not the GitHub App page', async () => {
+    const api = new AdamantApi(config, async () =>
+      Response.json({ url: 'https://evil.example/apps/adamant/installations/new' }),
+    )
+    await assert.rejects(api.installUrl(), /does not understand/)
+  })
 })

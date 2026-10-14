@@ -54,11 +54,12 @@ Installed on the eval repo. The **hosted** API and worker stay up. GitHub
 sends webhooks to that origin. We do **not** poll. Compose on a laptop is
 only for developing the backend.
 
-| Event                          | We do                                                                                       |
-| ------------------------------ | ------------------------------------------------------------------------------------------- |
-| `workflow_run` failed          | On the default branch of the bound repo only: insert `queued` run, enqueue `graph_step`     |
-| `pull_request` closed + merged | If `pr_number` matches a run → `merged`. Else keep the delivery (`run_id` null) for the CLI |
-| `ping` / `installation`        | Store delivery; upsert `installations` / `repo_bindings`                                    |
+| Event                             | We do                                                                                                     |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `workflow_run` failed             | On the default branch of the bound repo only: insert `queued` run, enqueue `graph_step`                   |
+| `pull_request` closed + merged    | If `pr_number` matches a run → `merged`. Else keep the delivery (`run_id` null) for the CLI               |
+| `ping` / `installation`           | Store delivery; upsert `installations` / `repo_bindings`                                                  |
+| `installation_repositories` added | Store the delivery; upsert the installation and the added repositories. No heal. `removed` is not applied |
 
 A merge never starts a heal. Red CI does.
 
@@ -71,12 +72,19 @@ the API is not hosted yet.
 (`ADAMANT_API_URL` + `ADAMANT_SESSION`). Read-only. It stays connected
 (`watch` = SSE, reconnect on drop). Closing the CLI does not stop heals.
 
-| Command            | Hosted API                                |
-| ------------------ | ----------------------------------------- |
-| `adamant status`   | `GET /health`                             |
-| `adamant runs`     | `GET /runs`                               |
-| `adamant run <id>` | `GET /runs/:id` (status + `audit_events`) |
-| `adamant watch`    | `GET /activity` SSE                       |
+| Command                          | Hosted API                                                          |
+| -------------------------------- | ------------------------------------------------------------------- |
+| `adamant status`                 | `GET /health`                                                       |
+| `adamant runs`                   | `GET /runs`                                                         |
+| `adamant run <id>`               | `GET /runs/:id` (status + `audit_events`)                           |
+| `adamant watch`                  | `GET /activity` SSE                                                 |
+| `adamant install <owner>/<repo>` | `GET /github/install`, then poll `GET /github/installations/status` |
+
+`install` prints `https://github.com/apps/<GITHUB_APP_SLUG>/installations/new`
+and waits until that exact owner and name is a `repositories` row. The CLI
+does not hold the slug, a private key, or an installation token. Without
+Postgres the API says install confirmation needs the hosted API; it does not
+read the in-memory schema maps.
 
 No OpenAI key, no GitHub token, no merge from the CLI. Until the API is
 hosted, the CLI defaults to `http://localhost:8787`; switch the default to
@@ -99,13 +107,15 @@ created.
 
 ## Auth
 
-| Route           | Auth                  | Does                                            |
-| --------------- | --------------------- | ----------------------------------------------- |
-| GitHub webhook  | `X-Hub-Signature-256` | Insert `webhook_deliveries`; maybe create a run |
-| `POST /runs`    | Seeded session        | Start a run                                     |
-| `GET /runs`     | Seeded session        | CLI list                                        |
-| `GET /runs/:id` | Seeded session        | CLI detail                                      |
-| `GET /activity` | Seeded session        | CLI watch (deliveries + audit, newest first)    |
+| Route                              | Auth                  | Does                                            |
+| ---------------------------------- | --------------------- | ----------------------------------------------- |
+| GitHub webhook                     | `X-Hub-Signature-256` | Insert `webhook_deliveries`; maybe create a run |
+| `POST /runs`                       | Seeded session        | Start a run                                     |
+| `GET /runs`                        | Seeded session        | CLI list                                        |
+| `GET /runs/:id`                    | Seeded session        | CLI detail                                      |
+| `GET /activity`                    | Seeded session        | CLI watch (deliveries + audit, newest first)    |
+| `GET /github/install`              | Session               | Public install URL from `GITHUB_APP_SLUG`       |
+| `GET /github/installations/status` | Session               | Exact `repositories` owner and name, or 404     |
 
 Webhook: known `installation_id`, bind the repo, insert
 `webhook_deliveries` **before** the run. Duplicate `delivery_id` → ACK, no

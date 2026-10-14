@@ -337,4 +337,38 @@ describe('webhook triggers a heal', () => {
     assert.deepEqual(store.boundRepoIds, [1234, 5678])
     assert.equal(store.deliveries.get('delivery-repos')?.repositoryId, null)
   })
+
+  it('upserts repositories added to an existing installation and does not start a heal', async () => {
+    const { store, enqueued, webhooks } = service()
+
+    const result = await webhooks.processEvent('delivery-added', 'installation_repositories', {
+      action: 'added',
+      installation,
+      repositories_added: [{ id: 42, name: 'eval', full_name: 'acme/eval' }],
+      repositories_removed: [],
+    })
+
+    assert.equal(result.runId, null)
+    assert.deepEqual(enqueued, [])
+    assert.deepEqual(store.queuedRuns, [])
+    assert.deepEqual(store.boundRepoIds, [42])
+    assert.equal(store.deliveries.get('delivery-added')?.eventType, 'installation_repositories')
+    assert.equal(store.deliveries.get('delivery-added')?.installationId, 'installation-99')
+  })
+
+  it('does not drop a repository when it is removed from an installation', async () => {
+    const { store, enqueued, webhooks } = service()
+
+    const result = await webhooks.processEvent('delivery-removed', 'installation_repositories', {
+      action: 'removed',
+      installation,
+      repositories_added: [],
+      repositories_removed: [{ id: 42, name: 'eval', full_name: 'acme/eval' }],
+    })
+
+    assert.equal(result.runId, null)
+    assert.deepEqual(enqueued, [])
+    assert.deepEqual(store.boundRepoIds, [])
+    assert.equal(store.deliveries.get('delivery-removed')?.eventType, 'installation_repositories')
+  })
 })

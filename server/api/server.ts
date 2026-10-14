@@ -5,6 +5,10 @@ import { createApp, resourceNames } from './app.ts'
 import { createAuthMiddleware } from './middleware/auth.ts'
 import { createActivityRoute } from './routes/activity.ts'
 import { createAuthRoute, type OAuthConfig } from './routes/auth.ts'
+import {
+  createGithubInstallRoute,
+  createGithubInstallUnavailableRoute,
+} from './routes/githubInstall.ts'
 import { createRunsRoute } from './routes/runs.ts'
 import {
   createActivityService,
@@ -16,6 +20,7 @@ import {
   createPostgresRunApiStore,
   type RunApiStore,
 } from './services/runStore.ts'
+import { findInstalledRepository } from './services/repositoryLookup.ts'
 import { createWebhookService } from './services/webhookService.ts'
 import { createPostgresWebhookStore } from './services/webhookStore.ts'
 import { createGithubWebhookRoute } from './webhooks/github.ts'
@@ -87,7 +92,21 @@ export function createServerApp(runStore?: RunApiStore, options: ServerOptions =
   // the session lookup on every request.
   app.route('/runs', createRunsRoute(resolvedRunStore, alreadyAuthenticated))
 
+  // Confirmation is a `repositories` row the webhook wrote. The in-memory schema
+  // maps are a different store, so without Postgres these paths only explain that.
+  app.use('/github', authMiddleware)
+  app.use('/github/*', authMiddleware)
   if (database) {
+    app.route(
+      '/github',
+      createGithubInstallRoute(
+        {
+          findRepository: (owner, name) => findInstalledRepository(database, owner, name),
+          readAppSlug: () => process.env.GITHUB_APP_SLUG,
+        },
+        alreadyAuthenticated,
+      ),
+    )
     app.route(
       '/auth',
       createAuthRoute(database, options.oauthConfig ?? readOAuthConfig(), {
@@ -96,6 +115,7 @@ export function createServerApp(runStore?: RunApiStore, options: ServerOptions =
     )
     app.get('/health', (c) => c.json({ status: 'ok' }))
   } else {
+    app.route('/github', createGithubInstallUnavailableRoute(alreadyAuthenticated))
     createApp(undefined, app, resolvedActivityService, ['runs'])
   }
 

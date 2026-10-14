@@ -8,16 +8,22 @@ import { type CommandDefinition, resolveSubmission, suggestionsFor } from './com
 import { type CommandController, formatActivity, type OutputLine } from './controller.ts'
 import { type ActivityConnectionState, type ActivityEvent } from './sse.ts'
 
-const accent = '#55a8ff'
+const ink = '#e6edf3'
+const accent = '#58a6ff'
 const brandGold = '#d6a62b'
 const muted = '#8b949e'
+const dim = '#6e7681'
 const error = '#f97583'
-const success = '#56d364'
+const success = '#3fb950'
+const selectedBg = '#1f6feb'
+const selectedDescription = '#d6e8ff'
+const promptBg = '#21262d'
 
 // Scrollback kept in memory. Older lines are dropped rather than hidden, so a
 // long session does not re-render an ever-growing list.
 const MAX_LINES = 1_000
 const MAX_ACTIVITY = 200
+const NAME_COLUMN = 16
 
 type CliAppProps = {
   controller: CommandController
@@ -36,19 +42,8 @@ function toneColor(tone: OutputLine['tone']): string {
     case 'muted':
       return muted
     case 'normal':
-      return '#e6edf3'
+      return ink
   }
-}
-
-function connectionLabel(state: ActivityConnectionState | undefined): string | undefined {
-  if (!state) return undefined
-  if (state.kind === 'connected') return 'Watching live activity.'
-  if (state.kind === 'connecting') return 'Connecting to activity…'
-  return `Reconnecting in ${Math.ceil(state.delayMs / 1_000)}s (attempt ${state.attempt})…`
-}
-
-function suggestionLabel(command: CommandDefinition, selected: boolean): string {
-  return `${selected ? '›' : ' '} ${command.usage}  ${command.description}`
 }
 
 function displayPath(path: string): string {
@@ -56,8 +51,68 @@ function displayPath(path: string): string {
   return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path
 }
 
+function presence(
+  busy: boolean,
+  state: ActivityConnectionState | undefined,
+): {
+  label: string
+  color: string
+} {
+  if (busy) return { label: 'working', color: accent }
+  if (state?.kind === 'connected') return { label: 'watching', color: success }
+  if (state?.kind === 'connecting') return { label: 'connecting', color: brandGold }
+  if (state?.kind === 'reconnecting') {
+    return { label: `reconnecting ${Math.ceil(state.delayMs / 1_000)}s`, color: brandGold }
+  }
+  return { label: 'ready', color: brandGold }
+}
+
 const keep = <T,>(items: readonly T[], limit: number): readonly T[] =>
   items.length > limit ? items.slice(-limit) : items
+
+function CommandPalette({
+  commands,
+  selectedIndex,
+}: {
+  commands: readonly CommandDefinition[]
+  selectedIndex: number
+}) {
+  return (
+    <box flexDirection="column" style={{ flexShrink: 0, width: '100%' }}>
+      {commands.map((command, index) => {
+        const selected = index === selectedIndex
+        return (
+          <box
+            key={command.name}
+            flexDirection="row"
+            alignItems="flex-start"
+            style={{
+              width: '100%',
+              paddingLeft: 1,
+              paddingRight: 1,
+              ...(selected ? { backgroundColor: selectedBg } : {}),
+            }}
+          >
+            <text
+              fg={selected ? '#ffffff' : ink}
+              {...(selected ? { bg: selectedBg, attributes: 1 } : {})}
+              style={{ width: NAME_COLUMN, flexShrink: 0 }}
+            >
+              {`/${command.name}`}
+            </text>
+            <text
+              fg={selected ? selectedDescription : muted}
+              {...(selected ? { bg: selectedBg } : {})}
+              style={{ flexGrow: 1, flexShrink: 1 }}
+            >
+              {command.description}
+            </text>
+          </box>
+        )
+      })}
+    </box>
+  )
+}
 
 export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
   const [input, setInput] = useState('')
@@ -71,6 +126,7 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
   const busyRef = useRef(false)
   const [connection, setConnection] = useState<ActivityConnectionState>()
   const watchAbortRef = useRef<AbortController | undefined>(undefined)
+  const commandAbortRef = useRef<AbortController | undefined>(undefined)
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const [spinnerFrame, setSpinnerFrame] = useState(0)
   const suggestions = useMemo(() => suggestionsFor(input), [input])
@@ -88,6 +144,7 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
     if (initialCommand) void submit(initialCommand)
     return () => {
       watchAbortRef.current?.abort()
+      commandAbortRef.current?.abort()
     }
   }, [])
 
@@ -152,6 +209,9 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
 
   const execute = async (command: string) => {
     stopWatching()
+    commandAbortRef.current?.abort()
+    const abort = new AbortController()
+    commandAbortRef.current = abort
     // After scrolling back, a new command's output would land out of view;
     // returning to the bottom also re-engages sticky scrolling.
     const scroll = scrollRef.current
@@ -160,15 +220,14 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
     setBusy(true)
     setInput('')
     try {
-      const result = await controller.execute(command)
+      const result = await controller.execute(command, abort.signal, appendLines)
       if (result.kind === 'clear') {
         clearScreen()
-      } else if (result.kind === 'quit') {
-        onExit()
       } else if (result.kind === 'watch') {
         startWatching()
       } else {
-        appendLines(result.lines)
+        // `/install` prints the URL while it polls; appending again would repeat it.
+        if (!result.streamed) appendLines(result.lines)
         if (result.runs) {
           setRunChoices(result.lines.filter((entry) => entry.runId))
           setSelectedRun(0)
@@ -177,6 +236,7 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
     } catch (commandError) {
       appendError(commandError instanceof Error ? commandError.message : 'Command failed.')
     } finally {
+      if (commandAbortRef.current === abort) commandAbortRef.current = undefined
       busyRef.current = false
       setBusy(false)
     }
@@ -201,7 +261,7 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
   const completeSuggestion = () => {
     const suggested = suggestions[suggestionIndex]
     if (!suggested) return
-    setInput(`${suggested.usage.split(' ')[0]} `)
+    setInput(`/${suggested.name} `)
   }
 
   useKeyboard((key) => {
@@ -217,6 +277,8 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
     }
     if (key.name === 'escape') {
       key.preventDefault()
+      // Esc leaves `/install` instead of waiting until the webhook arrives.
+      if (busyRef.current) commandAbortRef.current?.abort()
       setInput('')
       return
     }
@@ -248,40 +310,52 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
     }
   })
 
-  const status = connectionLabel(connection)
+  const state = presence(busy, connection)
   const selectedLineId = runChoices[selectedRun]?.id
   const showBrand = lines.length === 0 && activity.length === 0
   const version = `v${process.env.npm_package_version ?? '0.1.0'}`
-  const footer =
-    runChoices.length > 0 && input === ''
-      ? '↑↓ select run · Enter open · PgUp/PgDn scroll · Ctrl+L clear · Ctrl+C quit'
-      : '↑↓ navigate · Tab complete · PgUp/PgDn scroll · Ctrl+L clear · Ctrl+C quit'
+  const cwd = displayPath(process.cwd())
+  const hint = busy
+    ? 'esc stop · ctrl+c exit'
+    : suggestions.length > 0
+      ? '↑↓ select · tab complete · enter run'
+      : runChoices.length > 0 && input === ''
+        ? '↑↓ select · enter open'
+        : '/ commands · ctrl+l clear · ctrl+c exit'
+  const spinnerGlyph = spinner.frames[spinnerFrame] ?? '·'
 
   return (
-    <box flexDirection="column" style={{ height: '100%', paddingLeft: 1, paddingRight: 1 }}>
+    <box flexDirection="column" style={{ height: '100%', width: '100%' }}>
       {showBrand ? (
-        <box flexDirection="row" style={{ flexShrink: 0 }}>
+        <box
+          flexDirection="row"
+          alignItems="center"
+          style={{ flexShrink: 0, paddingLeft: 1, paddingRight: 1 }}
+        >
           <box flexDirection="column">
             {X_LOGO.map((row, index) => (
-              <text key={`${index}-${row}`} fg={brandGold} attributes={1}>
+              <text key={`${index}-${row}`} fg={brandGold}>
                 {row}
               </text>
             ))}
           </box>
-          <box flexDirection="column" style={{ paddingLeft: 2, paddingTop: 2 }}>
-            <text fg={brandGold} attributes={1}>
-              ADAMANT
-            </text>
-            <text fg="#e6edf3">Hosted repair CLI</text>
-            <text fg={muted}>{version}</text>
+          <box flexDirection="column" style={{ paddingLeft: 2 }}>
+            <box flexDirection="row">
+              <text fg={ink} attributes={1}>
+                Adamant
+              </text>
+              <text fg={muted}>{`  ${version}`}</text>
+            </box>
+            <text fg={muted}>Self Healing Code Agent</text>
+            <text fg={dim}>{cwd}</text>
           </box>
         </box>
       ) : (
-        <box flexDirection="column" style={{ flexShrink: 0 }}>
-          <text fg={brandGold} attributes={1}>
-            ADAMANT
+        <box flexDirection="row" style={{ flexShrink: 0, paddingLeft: 1, paddingRight: 1 }}>
+          <text fg={ink} attributes={1}>
+            Adamant
           </text>
-          <text fg={muted}>{`${version} · ${displayPath(process.cwd())}`}</text>
+          <text fg={muted}>{`  ${version}`}</text>
         </box>
       )}
 
@@ -291,59 +365,70 @@ export function CliApp({ controller, initialCommand, onExit }: CliAppProps) {
         ref={scrollRef}
         stickyScroll
         stickyStart="bottom"
-        style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, marginTop: 1 }}
+        style={{
+          flexGrow: 1,
+          flexShrink: 1,
+          minHeight: 0,
+          marginTop: 1,
+          paddingLeft: 1,
+          paddingRight: 1,
+        }}
       >
-        {lines.map((entry) => (
-          <text
-            key={entry.id}
-            fg={entry.id === selectedLineId ? accent : toneColor(entry.tone)}
-            {...(entry.id === selectedLineId ? { attributes: 1 } : {})}
-          >
-            {entry.text}
-          </text>
-        ))}
+        {lines.map((entry) => {
+          const selected = entry.id === selectedLineId
+          return (
+            <text
+              key={entry.id}
+              fg={selected ? '#ffffff' : toneColor(entry.tone)}
+              {...(selected ? { bg: selectedBg, attributes: 1 } : {})}
+            >
+              {entry.text}
+            </text>
+          )
+        })}
         {activity.map((event, index) => (
-          <text key={event.id} fg={index === activity.length - 1 ? '#e6edf3' : muted}>
+          <text key={event.id} fg={index === activity.length - 1 ? ink : muted}>
             {formatActivity(event)}
           </text>
         ))}
       </scrollbox>
 
-      {/* Everything below the scrollback keeps its rows; only the scrollback gives way. */}
-      {busy ? (
-        <text fg={accent} style={{ flexShrink: 0 }}>
-          {`${spinner.frames[spinnerFrame] ?? '·'} Working…`}
-        </text>
-      ) : null}
-      {status ? (
-        <text fg={muted} style={{ flexShrink: 0 }}>
-          {status}
-        </text>
-      ) : null}
-
       {suggestions.length > 0 ? (
-        <box flexDirection="column" style={{ flexShrink: 0 }}>
-          {suggestions.map((suggestion, index) => (
-            <text key={suggestion.name} fg={index === suggestionIndex ? accent : muted}>
-              {suggestionLabel(suggestion, index === suggestionIndex)}
-            </text>
-          ))}
-        </box>
+        <CommandPalette commands={suggestions} selectedIndex={suggestionIndex} />
       ) : null}
 
-      <box flexDirection="row" style={{ flexShrink: 0 }}>
-        <text fg={accent}>› </text>
+      <box
+        flexDirection="row"
+        alignItems="center"
+        style={{
+          flexShrink: 0,
+          width: '100%',
+          backgroundColor: promptBg,
+          paddingLeft: 1,
+          paddingRight: 1,
+        }}
+      >
+        <text fg={ink} bg={promptBg}>
+          {'> '}
+        </text>
         <input
           focused
-          placeholder="Type /help for commands"
+          placeholder="Type / for commands"
+          placeholderColor={muted}
+          textColor={ink}
+          backgroundColor={promptBg}
+          focusedBackgroundColor={promptBg}
+          focusedTextColor={ink}
           value={input}
           onInput={setInput}
           onSubmit={() => void submit()}
           style={{ flexGrow: 1 }}
         />
       </box>
-      <text fg={muted} style={{ flexShrink: 0 }}>
-        {footer}
+      <text style={{ flexShrink: 0, paddingLeft: 1, paddingRight: 1 }}>
+        {busy ? <span fg={accent}>{`${spinnerGlyph} `}</span> : null}
+        <span fg={state.color}>{state.label}</span>
+        <span fg={muted}>{` · ${cwd} · ${hint}`}</span>
       </text>
     </box>
   )

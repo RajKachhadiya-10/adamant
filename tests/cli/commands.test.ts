@@ -23,13 +23,40 @@ describe('Adamant CLI commands', () => {
       repositoryId: 'repo_1',
       sourceSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     })
+    assert.deepEqual(parseCommand('/install acme/eval'), {
+      name: 'install',
+      owner: 'acme',
+      repo: 'eval',
+    })
+    assert.deepEqual(parseCommand(argvToCommand(['install', 'acme/my.repo']) ?? ''), {
+      name: 'install',
+      owner: 'acme',
+      repo: 'my.repo',
+    })
   })
 
   it('rejects malformed and unsupported commands without a request', () => {
     assert.throws(() => parseCommand('status'), /Start commands with/)
-    assert.throws(() => parseCommand('/run'), /Usage: \/run/)
+    assert.throws(() => parseCommand('/run'), /\/run needs one run id/)
+    assert.throws(() => parseCommand('/quit'), /Unknown command/)
     assert.throws(() => parseCommand('/trigger repo short'), /full 40- or 64-character/)
     assert.throws(() => parseCommand('/unknown'), /Unknown command/)
+    assert.throws(() => parseCommand('/install'), /Usage: \/install/)
+    assert.throws(() => parseCommand('/install acme/eval extra'), /Usage: \/install/)
+    assert.throws(() => parseCommand('/install ../etc'), /no extra path/)
+    assert.throws(() => parseCommand('/install acme/../../etc'), /no extra path/)
+    assert.throws(() => parseCommand('/install acme/foo.git'), /no extra path/)
+    assert.throws(() => parseCommand(`/install ${'a'.repeat(40)}/eval`), /no extra path/)
+  })
+
+  it('lists slash names without argument placeholders or a quit command', () => {
+    assert.deepEqual(
+      suggestionsFor('/').map((command) => `/${command.name}`),
+      ['/help', '/status', '/install', '/runs', '/run', '/watch', '/trigger', '/clear'],
+    )
+    for (const command of commandDefinitions) {
+      assert.equal(command.description.includes('<'), false)
+    }
   })
 
   it('offers prefix suggestions and routes argv through the same command form', () => {
@@ -48,6 +75,9 @@ describe('Adamant CLI commands', () => {
 
   it('completes a command that needs arguments rather than running it without them', () => {
     assert.deepEqual(resolveSubmission('/ru', definition('run')), { complete: '/run ' })
+    assert.deepEqual(resolveSubmission('/install', definition('install')), {
+      complete: '/install ',
+    })
     // `/run` is typed in full, even though `/runs` is highlighted first.
     assert.deepEqual(resolveSubmission('/run', definition('runs')), { complete: '/run ' })
   })
