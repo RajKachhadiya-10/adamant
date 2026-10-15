@@ -30,6 +30,8 @@ export interface InstallationInput {
   readonly githubInstallationId: number
   readonly accountLogin: string
   readonly accountType: string
+  /** The account's numeric GitHub id; links the installation to a signed-in user. */
+  readonly accountGithubId?: number
 }
 
 export interface RepositoryInput {
@@ -78,10 +80,18 @@ export function createPostgresWebhookStore(db: Db): WebhookStore {
           githubInstallationId: input.githubInstallationId,
           accountLogin: input.accountLogin,
           accountType: input.accountType,
+          accountGithubId: input.accountGithubId ?? null,
         })
         .onConflictDoUpdate({
           target: githubInstallations.githubInstallationId,
-          set: { accountLogin: input.accountLogin, updatedAt: new Date() },
+          set: {
+            accountLogin: input.accountLogin,
+            // A payload without the id must not erase one already recorded.
+            ...(input.accountGithubId === undefined
+              ? {}
+              : { accountGithubId: input.accountGithubId }),
+            updatedAt: new Date(),
+          },
         })
         .returning({ id: githubInstallations.id })
 
@@ -204,6 +214,7 @@ export interface MemoryWebhookStore extends WebhookStore {
   readonly publishedPrs: Map<string, string>
   readonly runStatuses: Map<string, string>
   readonly boundRepoIds: number[]
+  readonly boundInstallations: InstallationInput[]
 }
 
 export function createMemoryWebhookStore(): MemoryWebhookStore {
@@ -214,6 +225,7 @@ export function createMemoryWebhookStore(): MemoryWebhookStore {
   const publishedPrs = new Map<string, string>()
   const runStatuses = new Map<string, string>()
   const boundRepoIds: number[] = []
+  const boundInstallations: InstallationInput[] = []
   const installations = new Map<number, string>()
   const repos = new Map<number, string>()
   const idempotencyKeys = new Set<string>()
@@ -226,10 +238,12 @@ export function createMemoryWebhookStore(): MemoryWebhookStore {
     publishedPrs,
     runStatuses,
     boundRepoIds,
+    boundInstallations,
     transaction(callback) {
       return callback(store)
     },
     async upsertInstallation(input) {
+      boundInstallations.push(input)
       const existing = installations.get(input.githubInstallationId)
       if (existing) return existing
       const id = `installation-${input.githubInstallationId}`

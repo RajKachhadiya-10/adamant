@@ -43,6 +43,20 @@
       "when": 1791970833166,
       "tag": "0005_activity_notify",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792050701597,
+      "tag": "0006_auto_merge_and_account_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792061396765,
+      "tag": "0007_cli_logins_and_pkce",
+      "breakpoints": true
     }
   ]
 }

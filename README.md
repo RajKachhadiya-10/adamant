@@ -48,21 +48,22 @@ Every tool call the agent made is on `tool_invocations` and `audit_events`, keye
 
 The heal loop runs on the hosted API and worker ([docs/tasks.md](docs/tasks.md)).
 
-| Piece                                                                        | State                                                 |
-| ---------------------------------------------------------------------------- | ----------------------------------------------------- |
-| Webhooks → `runs` in Postgres, dedupe by delivery id                         | Implemented                                           |
-| Worker + heal graph (triage → diagnose → patch → sandbox → PR → merge)       | Implemented                                           |
-| Docker sandbox runner                                                        | Implemented                                           |
-| `POST /runs`, `GET /runs`, `GET /runs/:id`                                   | Implemented                                           |
-| GitHub and Google OAuth, sessions, `GET /auth/me`                            | Implemented in the API; the Electron app has no login |
-| `GET /activity` SSE feed                                                     | Implemented                                           |
-| `@adamant/cli` (`status`, `install`, `runs`, `run <id>`, `watch`, `trigger`) | Implemented                                           |
-| Electron app                                                                 | Shell only; healing does not run from it              |
-| Human-in-the-loop approval before merge                                      | Later                                                 |
+| Piece                                                                      | State                                                 |
+| -------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Webhooks → `runs` in Postgres, dedupe by delivery id                       | Implemented                                           |
+| Worker + heal graph (triage → diagnose → patch → sandbox → PR → merge)     | Implemented                                           |
+| Docker sandbox runner                                                      | Implemented                                           |
+| `POST /runs`, `GET /runs`, `GET /runs/:id`                                 | Implemented                                           |
+| GitHub and Google OAuth, sessions, `GET /auth/me`                          | Implemented in the API; the Electron app has no login |
+| `GET /activity` SSE feed                                                   | Implemented                                           |
+| TUI (`status`, `login`, `install`, `runs`, `run <id>`, `watch`, `trigger`) | Implemented                                           |
+| Electron app                                                               | Shell only; healing does not run from it              |
+| Human-in-the-loop approval before merge                                    | Later                                                 |
 
 ## Quick start
 
-Node.js 22.12+, pnpm 10+, and Docker (for Postgres and the sandbox).
+Node.js 22.12+, pnpm 10+, Docker (for Postgres and the sandbox), and a Rust toolchain (`cargo`)
+for the terminal.
 
 ### Backend
 
@@ -89,41 +90,54 @@ Real deliveries need a public URL: host the API, or point the App at smee/ngrok 
 developing it locally. Installing and subscribing the App is in
 [docs/product.md](docs/product.md#how-the-github-app-works).
 
-### CLI
+### Terminal
 
-The full-screen CLI requires Node.js 26.4+ because its OpenTUI renderer uses Node's experimental
-FFI. It is only a session-authenticated monitor and trigger client: it never receives OpenAI or
-GitHub credentials, and it cannot merge a pull request.
+`tui/` is the `adamant` terminal, a Rust (ratatui) client of the API with a Codex-style agent:
+type a request and it runs commands and edits files here, in `auto` or `manual` approval mode
+(shift-tab switches). It reads the model key from `OPENAI_API_KEY` or `~/.adamant/openai_key` and
+never sends it to the API. `/repos` installs the GitHub App on repositories you pick, and the
+terminal then shows each heal live. It never receives GitHub credentials, and it cannot merge a
+pull request.
 
-It needs a session. Mint one; the token is printed once and only its hash is stored. It lasts 30
-days, and `POST /auth/logout` with it revokes it. Under Compose, run
-`docker compose exec -T api node --experimental-strip-types api/create-session.ts` instead.
+`scripts/adamant` builds the terminal, starts the local API and worker in the background, and then
+opens the terminal in the current directory. It reuses an API already answering on :8787 and a
+worker already running for this checkout, logs to `.adamant/logs/`, and leaves both running when
+the terminal exits. With `ADAMANT_WEBHOOK_PROXY_URL` (a smee.io channel) in `.env` it also keeps a
+smee forwarder from that channel to `/webhooks/github`, so GitHub reaches a laptop; set the App's
+webhook URL to the channel.
+
+```bash
+./scripts/adamant install      # once: link `adamant` into a writable directory on PATH
+adamant                        # API + worker, then the terminal
+adamant down                   # stop the API and worker the launcher started
+```
+
+`pnpm adamant [command]` runs the terminal alone, against an API that is already up.
+
+The terminal needs a session. With GitHub OAuth configured on the API, `/login` signs in through
+the browser and keeps the session in `~/.adamant/session`. Otherwise mint one; the token is printed
+once and only its hash is stored. It lasts 30 days, and `POST /auth/logout` with it revokes it.
+Under Compose, run `docker compose exec -T api node --experimental-strip-types api/create-session.ts`
+instead. The launcher mints one itself when neither `ADAMANT_SESSION` nor `~/.adamant/session` is
+set.
 
 ```bash
 export ADAMANT_SESSION=$(pnpm --silent --filter @adamant/server session:create)
 pnpm adamant
 ```
 
-Until the API is hosted, the CLI defaults to `http://localhost:8787`. Set `ADAMANT_API_URL` to point
-it elsewhere; it must be an HTTPS origin, except `localhost` development URLs. Start
-with `pnpm adamant status`, `pnpm adamant install <owner>/<repo>`, `pnpm adamant runs`,
-`pnpm adamant run <id>`, or `pnpm adamant watch` to execute the same command in the interactive
+Until the API is hosted, the terminal defaults to `http://localhost:8787`. Set `ADAMANT_API_URL` to
+point it elsewhere; it must be an HTTPS origin, except `localhost` development URLs. Start with
+`adamant status`, `adamant install <owner>/<repo>`, `adamant runs`, `adamant run <id>`, or
+`adamant watch` (or the same after `pnpm adamant`) to run that command in the interactive
 interface. `status` checks the session as well as the API, so it is the first thing to run when
 other commands fail.
 
 `install` prints the GitHub App install URL and waits until that exact repository is in Postgres.
-The CLI does not know `GITHUB_APP_SLUG` and never receives an installation token: the API builds
-`https://github.com/apps/<slug>/installations/new`, and only the webhook writes the `repositories`
-row. Install the App on that owner/repo, or add the repository to an existing installation. Esc
-stops the wait.
-
-To run it as `adamant` from any directory, link it once after `pnpm install`. The link points at
-this checkout, so source changes apply without a rebuild.
-
-```bash
-cd cli && npm link
-adamant status
-```
+The terminal does not know `GITHUB_APP_SLUG` and never receives an installation token: the API
+builds `https://github.com/apps/<slug>/installations/new`, and only the webhook writes the
+`repositories` row. Install the App on that owner/repo, or add the repository to an existing
+installation. Esc stops the wait.
 
 ### Desktop shell
 
@@ -219,22 +233,21 @@ Backend scripts run through `pnpm --filter @adamant/server <script>`:
 | `db:studio`                  | Drizzle Studio against `DATABASE_URL`        |
 | `session:create [username]`  | Print a new CLI session (default user `cli`) |
 
-Inside the CLI, type `/` for the command list: `/help`, `/status`, `/install`, `/runs`, `/run`,
-`/watch`, `/trigger`, and `/clear`. `/install` takes `owner/repo`. `/run` takes a run id.
+Inside the terminal, type `/` for the command list: `/help`, `/status`, `/login`, `/logout`, `/me`,
+`/repos`, `/install`, `/runs`, `/run`, `/watch`, `/stop`, `/trigger`, and `/clear`. `/install` takes `owner/repo`. `/run` takes a run id.
 `/trigger` takes a repository id and a full commit SHA. Tab completes a command and Enter runs
 the highlighted suggestion, so `/st` Enter runs `/status`.
 Up/Down move through suggestions; with an empty prompt, Up/Down or `j`/`k` select a row from
-`/runs` and Enter opens it. PgUp/PgDn scroll the output; Esc clears the prompt, or stops
-`/install` while it is waiting; Ctrl+L clears
-output; Ctrl+C exits. `/watch` resumes its SSE stream with `Last-Event-ID` after a dropped
-connection, reconnects a stream that has been silent for 45 s, and stops with a message when the
-session is refused.
+`/runs` and Enter opens it. `?` on an empty prompt shows the shortcuts. PgUp/PgDn scroll the
+output; Esc clears the prompt, or stops `/install`, `/login` or `/watch` while it runs; Ctrl+L
+clears output; Ctrl+C exits. `/watch` resumes its SSE stream with `Last-Event-ID` after a dropped
+connection, retrying after 1 s and backing off to 15 s while it keeps failing, and stops with a
+message when the session is refused.
 
 ## Layout
 
 ```
-cli/               @adamant/cli OpenTUI monitor and hosted API client
-contract/          @adamant/contract: zod schemas shared by API, worker, and CLI
+contract/          @adamant/contract: zod schemas shared by API and worker
 electron/          desktop shell
   main/            Electron main process: window, IPC handlers
   preload/         the only bridge into the renderer (CommonJS)
@@ -247,9 +260,11 @@ server/            @adamant/server: one package.json, one tsconfig.json
   agent/           LangGraph heal graph and tools; no HTTP
   sandbox/         Docker runner
 tests/             node:test suites, one folder per area
+tui/               adamant terminal (Rust, ratatui): hosted API client
 docs/              design docs
 .agents/skills/    task instructions for coding agents
 scripts/dev.mjs    Vite + watchers + Electron
+scripts/adamant    local API + worker, then the terminal
 ```
 
 `server/api` does not import `server/agent`, and `server/agent` does not import Hono — the worker

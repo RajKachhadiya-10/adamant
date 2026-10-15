@@ -136,12 +136,28 @@ export const INSTALL_CONFIRMATION_NEEDS_DATABASE =
 
 const cliLoginId = z.string().min(1).max(200)
 
+/**
+ * RFC 8628's alphabet for codes a person compares by eye: no vowels, so no words,
+ * and no digits, so nothing reads as another character.
+ */
+export const CLI_LOGIN_CODE_ALPHABET = 'BCDFGHJKLMNPQRSTVWXZ'
+
+/**
+ * The code the terminal prints and the browser shows before it lets a sign-in reach
+ * the terminal. Someone who sends a victim their own sign-in link gets a page whose
+ * code matches no terminal the victim has open.
+ */
+export const CliLoginCodeSchema = z
+  .string()
+  .regex(/^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/)
+
 /** Browser path only. The poll secret stays in the POST body, never this URL. */
 export const CliLoginStartSchema = z
   .object({
     loginId: cliLoginId,
     pollSecret: z.string().min(1).max(200),
     beginPath: z.string().regex(/^\/auth\/github\/cli\/begin\?login=[A-Za-z0-9_-]+$/),
+    userCode: CliLoginCodeSchema,
   })
   .strict()
 
@@ -168,3 +184,15 @@ export const CliLoginTokenSchema = z
       .refine((token) => !/[\s\p{Cc}]/u.test(token)),
   })
   .strict()
+
+/**
+ * The terminal's approval mode, kept on the user. `autoMerge: false` (manual) leaves a
+ * heal's PR open for review on the repositories that user's GitHub account owns.
+ */
+export const UserSettingsSchema = z
+  .object({
+    autoMerge: z.boolean(),
+  })
+  .strict()
+
+export type UserSettings = z.infer<typeof UserSettingsSchema>

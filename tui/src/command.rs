@@ -38,7 +38,7 @@ pub const SPECS: &[Spec] = &[
     },
     Spec {
         name: "repos",
-        summary: "Installed repositories",
+        summary: "Pick GitHub repositories for Adamant",
     },
     Spec {
         name: "install",
@@ -47,6 +47,18 @@ pub const SPECS: &[Spec] = &[
     Spec {
         name: "trigger",
         summary: "Start a heal",
+    },
+    Spec {
+        name: "new",
+        summary: "Start a new conversation",
+    },
+    Spec {
+        name: "auto",
+        summary: "Run commands and edits without asking",
+    },
+    Spec {
+        name: "manual",
+        summary: "Ask before each command or edit",
     },
     Spec {
         name: "clear",
@@ -60,9 +72,12 @@ pub const SPECS: &[Spec] = &[
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    Prompt(String),
     Status,
     Runs,
     Run(String),
+    /// `/run` without an id: pick one from the list.
+    PickRun,
     Watch,
     Stop,
     Login,
@@ -77,6 +92,9 @@ pub enum Command {
         repository_id: String,
         source_sha: String,
     },
+    New,
+    Auto,
+    Manual,
     Clear,
     Help,
     Usage(String),
@@ -86,9 +104,11 @@ pub enum Command {
 impl Command {
     pub fn echo(&self) -> String {
         match self {
+            Command::Prompt(text) => text.clone(),
             Command::Status => "/status".into(),
             Command::Runs => "/runs".into(),
             Command::Run(id) => format!("/run {id}"),
+            Command::PickRun => "/run".into(),
             Command::Watch => "/watch".into(),
             Command::Stop => "/stop".into(),
             Command::Login => "/login".into(),
@@ -108,6 +128,9 @@ impl Command {
                 repository_id,
                 source_sha,
             } => format!("/trigger {repository_id} {source_sha}"),
+            Command::New => "/new".into(),
+            Command::Auto => "/auto".into(),
+            Command::Manual => "/manual".into(),
             Command::Clear => "/clear".into(),
             Command::Help => "/help".into(),
             Command::Usage(text) | Command::Unknown(text) => text.clone(),
@@ -133,9 +156,31 @@ pub fn suggestions(input: &str) -> Vec<&'static Spec> {
         .collect()
 }
 
+/// What the composer sends: a slash command, or a prompt for the agent.
 pub fn parse(raw: &str) -> Command {
     let trimmed = raw.trim();
-    let body = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    match trimmed.strip_prefix('/') {
+        Some(body) => parse_command(trimmed, body),
+        None if trimmed.is_empty() => Command::Help,
+        None => Command::Prompt(trimmed.to_string()),
+    }
+}
+
+/// `adamant runs` and `adamant fix the build` both work from the shell.
+pub fn parse_args(raw: &str) -> Command {
+    let trimmed = raw.trim();
+    let first = trimmed.trim_start_matches('/').split_whitespace().next();
+    let known = first.is_some_and(|name| {
+        SPECS.iter().any(|spec| spec.name == name) || matches!(name, "cls" | "?")
+    });
+    if trimmed.starts_with('/') || known {
+        parse_command(trimmed, trimmed.trim_start_matches('/'))
+    } else {
+        parse(trimmed)
+    }
+}
+
+fn parse_command(trimmed: &str, body: &str) -> Command {
     let mut parts = body.split_whitespace();
     let Some(name) = parts.next() else {
         return Command::Help;
@@ -145,6 +190,7 @@ pub fn parse(raw: &str) -> Command {
         "status" => Command::Status,
         "runs" => Command::Runs,
         "run" => match rest.as_slice() {
+            [] => Command::PickRun,
             [id] if valid_id(id) => Command::Run((*id).to_string()),
             _ => Command::Usage("Usage: /run <id>".into()),
         },
@@ -156,6 +202,9 @@ pub fn parse(raw: &str) -> Command {
         "repos" => Command::Repos,
         "install" => parse_install(&rest),
         "trigger" => parse_trigger(&rest),
+        "new" => Command::New,
+        "auto" => Command::Auto,
+        "manual" => Command::Manual,
         "clear" | "cls" => Command::Clear,
         "help" | "?" => Command::Help,
         _ => Command::Unknown(trimmed.to_string()),
@@ -247,7 +296,9 @@ mod tests {
     #[test]
     fn parses_heal_commands() {
         assert_eq!(parse("/runs"), Command::Runs);
-        assert_eq!(parse("watch"), Command::Watch);
+        assert_eq!(parse("/run"), Command::PickRun);
+        assert_eq!(parse_args("watch"), Command::Watch);
+        assert_eq!(parse("/frobnicate"), Command::Unknown("/frobnicate".into()));
         assert_eq!(
             parse("/run abcdef12-abcd"),
             Command::Run("abcdef12-abcd".into())
@@ -260,6 +311,19 @@ mod tests {
                 name: Some("adamant".into())
             }
         );
+    }
+
+    #[test]
+    fn plain_text_is_a_prompt() {
+        assert_eq!(
+            parse("status of my runs"),
+            Command::Prompt("status of my runs".into())
+        );
+        assert_eq!(
+            parse_args("fix the failing test"),
+            Command::Prompt("fix the failing test".into())
+        );
+        assert_eq!(parse_args("run abc-123"), Command::Run("abc-123".into()));
     }
 
     #[test]

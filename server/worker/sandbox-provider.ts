@@ -21,6 +21,8 @@ export interface SandboxRunnerOptions {
   readonly installCommand?: string
   readonly testCommand: string
   readonly image?: string
+  /** The image's own user when it has one; `node` otherwise, as DockerSandbox defaults. */
+  readonly user?: string
   readonly timeoutMs?: number
   readonly installTimeoutMs?: number
   readonly sandbox?: Pick<DockerSandbox, 'run'> &
@@ -132,6 +134,7 @@ export function createDockerSandboxProvider(options: SandboxRunnerOptions): Dock
       ...(options.workdir ? { workdir: options.workdir } : {}),
       command,
       ...(options.image === undefined ? {} : { image: options.image }),
+      ...(options.user === undefined ? {} : { user: options.user }),
       ...extra,
     })
   }

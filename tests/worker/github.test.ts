@@ -3,6 +3,7 @@ import { generateKeyPairSync } from 'node:crypto'
 import { describe, it } from 'node:test'
 import {
   createGitHubClient,
+  privateKeyProblem,
   readGitHubAppConfig,
   type FetchLike,
 } from '../../server/worker/github.ts'
@@ -300,6 +301,22 @@ describe('GitHub App configuration', () => {
   it('is null when the worker has no app credentials, so callers fail closed', () => {
     assert.equal(readGitHubAppConfig({}), null)
     assert.equal(readGitHubAppConfig({ GITHUB_APP_ID: '1' }), null)
+  })
+
+  it('names a fingerprint pasted where the private key belongs', () => {
+    assert.match(String(privateKeyProblem('SHA256:mbzKIabcdef')), /fingerprint, not the key/)
+    assert.match(String(privateKeyProblem('not a key')), /not a PEM private key/)
+    assert.equal(privateKeyProblem(privateKey), null)
+  })
+
+  it('fails a token request with that reason instead of an OpenSSL code', async () => {
+    const client = createGitHubClient(
+      { appId: '1', privateKey: 'SHA256:mbzKIabcdef' },
+      async () => {
+        throw new Error('no request should be sent')
+      },
+    )
+    await assert.rejects(client.installationToken('9'), /fingerprint, not the key/)
   })
 
   it('restores newlines in a single-line private key', () => {

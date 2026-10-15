@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { SANDBOX_OWNED_PATHS } from './sandbox-profile.ts'
 
 /**
  * Allowlisted git. The model never reaches this class directly: the graph
@@ -36,6 +37,9 @@ const ALLOWED_SUBCOMMANDS = new Set([
   'push',
   'reset',
   'clean',
+  // Read-only, for the agent's list_files and search tools.
+  'ls-files',
+  'grep',
 ])
 
 /** Flags that turn an allowed subcommand into a denied operation. */
@@ -236,6 +240,10 @@ export class GitWorkspace {
     await this.run(['config', 'user.email', 'adamant[bot]@users.noreply.github.com'])
     await this.run(['config', 'commit.gpgsign', 'false'])
     await this.run(['remote', 'add', 'origin', this.remoteUrl])
+    // Never part of a candidate, and kept whole across the resets between them.
+    const info = path.join(this.options.dir, '.git', 'info')
+    await fs.mkdir(info, { recursive: true })
+    await fs.appendFile(path.join(info, 'exclude'), `${SANDBOX_OWNED_PATHS.join('\n')}\n`)
   }
 
   /** Shallow fetch of one commit. A full clone per run is the slow path. */
@@ -255,11 +263,7 @@ export class GitWorkspace {
    * second candidate independent of the first.
    */
   async applyPatch(patch: string): Promise<void> {
-    if (!this.baseSha) {
-      throw new Error('Checkout the base commit before applying a patch.')
-    }
-    await this.run(['reset', '--hard', '--quiet', this.baseSha])
-    await this.run(['clean', '-fd', '--quiet'])
+    await this.resetToBase()
     // git rejects a last hunk without its newline as a corrupt patch, and
     // `--recount` ignores hunk-header line counts, which models often get wrong.
     const input = patch.endsWith('\n') ? patch : `${patch}\n`
@@ -281,6 +285,47 @@ export class GitWorkspace {
    * names a file here wins. Nothing outside the worktree or under `.git` is
    * readable, symlinks included. Null when no suffix matches.
    */
+  /**
+   * The checked-out base, with nothing applied. `clean -fd` keeps ignored paths, so an
+   * install the sandbox made (node_modules) survives for the next candidate.
+   */
+  async resetToBase(): Promise<void> {
+    if (!this.baseSha) {
+      throw new Error('Checkout the base commit before applying a patch.')
+    }
+    await this.run(['reset', '--hard', '--quiet', this.baseSha])
+    await this.run(['clean', '-fd', '--quiet'])
+  }
+
+  /** Tracked files, so the model sees the project's shape without reading the disk. */
+  async listFiles(): Promise<string[]> {
+    const { stdout } = await this.run(['ls-files', '-z'])
+    return stdout.split('\0').filter((name) => name !== '')
+  }
+
+  /**
+   * Lines containing `text` literally. `-e` and `--` keep a pattern that starts with
+   * a dash from being read as an option; `-I` skips binaries. No match is exit 1.
+   */
+  async search(text: string): Promise<string> {
+    try {
+      const { stdout } = await this.run([
+        'grep',
+        '-n',
+        '-I',
+        '--no-color',
+        '--fixed-strings',
+        '-e',
+        text,
+        '--',
+      ])
+      return stdout
+    } catch (error) {
+      if (error instanceof GitCommandError && error.code === 1) return ''
+      throw error
+    }
+  }
+
   async readFile(fromLog: string): Promise<{ path: string; text: string } | null> {
     const segments = fromLog
       .replace(/\\/g, '/')

@@ -71,6 +71,18 @@ export function createGitHubGitProvider(
       return workspace.readFile(fromLog)
     },
 
+    async resetToBase() {
+      await workspace.resetToBase()
+    },
+
+    async listFiles() {
+      return workspace.listFiles()
+    },
+
+    async search(text) {
+      return workspace.search(text)
+    },
+
     async getFailureLogs() {
       return github.failedJobLogs({ ...repo, headSha: context.baseSha })
     },

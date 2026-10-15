@@ -21,7 +21,7 @@ Wiring: [backend-architecture.md](backend-architecture.md). Tables:
 | **2. LangGraph**  | `server/agent` + `server/worker`           | worker `invoke`s, `thread_id = run_id`                     |
 | **3. GitHub App** | `server/api`                               | App installed; failed CI starts a run; merges are recorded |
 | **4. Healing**    | tools + `server/sandbox` + OpenAI          | red CI → sandbox pass → our PR **merged**                  |
-| **5. CLI**        | `cli/`                                     | `watch` stays on the **hosted** API and shows runs/merges  |
+| **5. CLI**        | `tui/`                                     | `watch` stays on the **hosted** API and shows runs/merges  |
 
 `server/api` does **not** import `server/agent`. No `/agent` route.
 
@@ -80,13 +80,15 @@ Eval repo: App may merge (contents + pull-requests write; no blocking reviews fo
 
 ### 5. CLI
 
-| ID  | Who | Task                                                                            | Done when                                       |
-| --- | --- | ------------------------------------------------------------------------------- | ----------------------------------------------- |
-| 5.1 | R3  | Hosted `GET /activity` SSE (deliveries + audit)                                 | Done: remote CLI can stay connected             |
-| 5.2 | R3  | `@adamant/cli`: `status`, `runs`, `run <id>`, `watch`, `install <owner>/<repo>` | Done: CLI against the **hosted** URL shows feed |
+| ID  | Who | Task                                                                                         | Done when                                              |
+| --- | --- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| 5.1 | R3  | Hosted `GET /activity` SSE (deliveries + audit)                                              | Done: remote CLI can stay connected                    |
+| 5.2 | R3  | `adamant` terminal (`tui/`): `status`, `runs`, `run <id>`, `watch`, `install <owner>/<repo>` | Done: CLI against the **hosted** URL shows feed        |
+| 5.3 | R3  | Terminal agent (auto/manual approvals), `/repos` picker, live heal status                    | Done: prompt runs tools; install → feed shows the heal |
 
-CLI env: `ADAMANT_API_URL` (hosted origin) + `ADAMANT_SESSION`. Nothing
-else. `watch` is a long-lived SSE to that origin.
+CLI env: `ADAMANT_API_URL` (hosted origin) + `ADAMANT_SESSION`, plus the
+agent's own `OPENAI_API_KEY` (or `~/.adamant/openai_key`). The feed is a
+long-lived SSE to that origin.
 
 ## Order
 

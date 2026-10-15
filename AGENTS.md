@@ -20,7 +20,6 @@ Read before larger changes:
 ## Layout
 
 ```
-cli/                @adamant/cli monitor
 contract/           @adamant/contract shared zod schemas
 electron/           desktop shell
 server/             @adamant/server   one package.json and one tsconfig.json
@@ -29,6 +28,7 @@ server/             @adamant/server   one package.json and one tsconfig.json
   worker/           graphile-worker
   agent/            LangGraph; must not import Hono
   sandbox/          Docker runner
+tui/                adamant terminal (Rust, ratatui)
 docs/               design docs
 ```
 

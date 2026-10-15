@@ -6,11 +6,13 @@ What we chose and why. Task list: [tasks.md](tasks.md). Design:
 `@adamant/server` has the Hono API (health, runs, activity, GitHub webhooks),
 Drizzle schema, a graphile-worker process, the LangGraph code in `server/agent`, and a Docker
 sandbox runner. The worker's `graph_step` invokes `compileOpenAiHealGraph` with
-`thread_id = run_id`. `@adamant/cli` is an OpenTUI monitor connected to the hosted API.
+`thread_id = run_id`. The `adamant` terminal in `tui/` is a Rust (ratatui) client of
+the hosted API with its own coding agent (OpenAI Responses API, local tools).
 
 ## TypeScript everywhere
 
-CLI, API, workers, and agent share one pnpm workspace and one CI job.
+API, workers, and agent share one pnpm workspace and one CI job. The terminal is the exception: a
+Rust crate in `tui/`, outside the workspace and not yet in CI.
 Schemas live in `@adamant/contract` and are imported, not copied.
 
 LangGraph.js has the pieces we need (state graph, interrupts, Postgres
@@ -21,7 +23,7 @@ checkpoints). If it gets in the way, drive the same loop from `runs.status`.
 | Piece                 | Choice                                                              | Notes                                                                                          |
 | --------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | HTTP API              | [Hono](https://hono.dev) on `@hono/node-server`                     | Webhooks + CLI (`GET /runs`, `/activity`); raw body for HMAC                                   |
-| CLI                   | `@adamant/cli` on OpenTUI / Node 26.4+                              | Minimal full-screen monitor; HTTPS to hosted API; no model or GitHub token                     |
+| CLI                   | Rust: ratatui + crossterm, in `tui/`                                | Full-screen agent and heal feed; HTTPS to hosted API; user's own model key, no GitHub token    |
 | Validation / contract | `zod`, via `@hono/zod-validator`                                    | One schema package shared by API, workers and app                                              |
 | GitHub App + webhooks | `@octokit/app`, `@octokit/webhooks`                                 | Installation tokens minted per call; webhook signature checks                                  |
 | Database              | PostgreSQL with Drizzle ORM                                         | Migrations checked in                                                                          |
@@ -47,13 +49,12 @@ const app = new Hono().post('/runs', zValidator('json', CreateRunSchema), async 
 
 Fallback: Fastify. Skip NestJS and Express.
 
-Clients today: GitHub webhooks and `@adamant/cli` against the hosted
+Clients today: GitHub webhooks and the `adamant` terminal against the hosted
 API. Electron can import `typeof app` later via `hc<ApiType>`.
 
 ## Layout
 
 ```
-cli/                @adamant/cli OpenTUI monitor
 contract/           shared zod schemas
 electron/           desktop shell (Heal UI later)
 server/             @adamant/server — one package.json and one tsconfig.json
@@ -62,6 +63,7 @@ server/             @adamant/server — one package.json and one tsconfig.json
   worker/           graphile-worker
   agent/            LangGraph + tools; no HTTP
   sandbox/          Docker runner
+tui/                adamant terminal (Rust, ratatui)
 ```
 
 `server` is the backend workspace package in `pnpm-workspace.yaml`.

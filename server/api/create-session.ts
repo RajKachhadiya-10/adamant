@@ -6,11 +6,12 @@ import { createDb, users, type Db } from '../db/client.ts'
 import { createSession } from './services/authService.ts'
 
 /**
- * Mints a session for `adamant` against a Postgres-backed API. OAuth hands its
- * session to a browser as an HttpOnly cookie a terminal cannot read. Login in
- * the CLI collects that same session once through a one-time code; this command
- * is the other way in. The token is printed once; Postgres keeps only its hash,
- * it expires like an OAuth session, and POST /auth/logout revokes it.
+ * Mints a session for `adamant` against a Postgres-backed API. OAuth hands a
+ * browser its session as an HttpOnly cookie a terminal cannot read. Login in
+ * the CLI gets a session of its own once, through a poll only it can answer;
+ * this command is the other way in. The token is printed once; Postgres keeps
+ * only its hash, it expires like an OAuth session, and POST /auth/logout
+ * revokes it.
  *
  *   export ADAMANT_SESSION=$(pnpm --silent --filter @adamant/server session:create)
  */

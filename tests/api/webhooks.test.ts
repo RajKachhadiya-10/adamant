@@ -322,6 +322,25 @@ describe('webhook triggers a heal', () => {
     assert.equal(store.deliveries.get('delivery-install')?.installationId, 'installation-99')
   })
 
+  it("records the account's GitHub id, which links the installation to its owner", async () => {
+    const { store, webhooks } = service()
+
+    await webhooks.processEvent('delivery-owner', 'installation', {
+      action: 'created',
+      installation: { id: 99, account: { id: 4242, login: 'acme', type: 'User' } },
+      repository,
+    })
+    await webhooks.processEvent('delivery-no-id', 'installation_repositories', {
+      action: 'added',
+      installation,
+      repositories_added: [{ id: 1234, full_name: 'acme/eval' }],
+    })
+
+    assert.equal(store.boundInstallations[0]?.accountGithubId, 4242)
+    // A payload without the id leaves it out rather than sending null over it.
+    assert.equal('accountGithubId' in (store.boundInstallations[1] ?? {}), false)
+  })
+
   it('binds repositories listed on an installation payload', async () => {
     const { store, webhooks } = service()
 

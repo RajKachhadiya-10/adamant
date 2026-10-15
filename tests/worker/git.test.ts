@@ -387,3 +387,91 @@ describe('GitWorkspace against real git', () => {
     assert.equal(await ws.readFile('src'), null)
   })
 })
+
+describe('GitWorkspace tools for the heal agent, against real git', () => {
+  afterEach(async () => {
+    await Promise.all(
+      workspaces.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })),
+    )
+  })
+
+  // Python's .gitignore template ignores lib/, which is what gutted the venv.
+  async function pythonRepo() {
+    const dir = await tempDir()
+    const ws = new GitWorkspace({
+      runId: 'run-tools',
+      dir,
+      owner: 'acme',
+      name: 'eval',
+      token: async () => 'unused',
+    })
+    await ws.init()
+    await fs.mkdir(path.join(dir, 'src'))
+    await fs.writeFile(path.join(dir, 'src/pricing.py'), 'def total(a, b):\n    return a - b\n')
+    await fs.writeFile(path.join(dir, '.gitignore'), 'lib/\n__pycache__/\n')
+    await fs.writeFile(path.join(dir, '-n.txt'), 'a file named like a flag\n')
+    const env = { PATH: process.env.PATH ?? '', HOME: dir, GIT_CONFIG_GLOBAL: '/dev/null' }
+    for (const args of [
+      ['add', '--all'],
+      ['commit', '--quiet', '-m', 'base'],
+      ['rev-parse', 'HEAD'],
+    ]) {
+      const result = await execGit(args, { cwd: dir, env })
+      assert.equal(result.code, 0, result.stderr)
+      if (args[0] === 'rev-parse') await ws.checkout(result.stdout.trim())
+    }
+    return { dir, ws, env }
+  }
+
+  const fix = [
+    'diff --git a/src/pricing.py b/src/pricing.py',
+    '--- a/src/pricing.py',
+    '+++ b/src/pricing.py',
+    '@@ -1,2 +1,2 @@',
+    ' def total(a, b):',
+    '-    return a - b',
+    '+    return a + b',
+    '',
+  ].join('\n')
+
+  it('keeps the sandbox venv whole across the reset between candidates', async () => {
+    const { dir, ws } = await pythonRepo()
+    for (const part of ['bin', 'lib/python3.12', 'include']) {
+      await fs.mkdir(path.join(dir, '.adamant-venv', part), { recursive: true })
+    }
+    await fs.writeFile(path.join(dir, '.adamant-venv/bin/python'), '#!/bin/sh\n')
+    await fs.writeFile(path.join(dir, 'stray.txt'), 'written by a test run\n')
+
+    await ws.applyPatch(fix)
+    await ws.resetToBase()
+
+    await fs.access(path.join(dir, '.adamant-venv/bin/python'))
+    await fs.access(path.join(dir, '.adamant-venv/include'))
+    await assert.rejects(fs.access(path.join(dir, 'stray.txt')))
+    assert.equal(
+      await fs.readFile(path.join(dir, 'src/pricing.py'), 'utf8'),
+      'def total(a, b):\n    return a - b\n',
+    )
+  })
+
+  it('never commits the sandbox venv with a candidate', async () => {
+    const { dir, ws, env } = await pythonRepo()
+    await fs.mkdir(path.join(dir, '.adamant-venv/bin'), { recursive: true })
+    await fs.writeFile(path.join(dir, '.adamant-venv/bin/python'), '#!/bin/sh\n')
+    await ws.applyPatch(fix)
+    await ws.commitCandidate('fix: add')
+    const shown = await execGit(['show', '--name-only', '--format=', 'HEAD'], { cwd: dir, env })
+    assert.equal(shown.stdout.trim(), 'src/pricing.py')
+  })
+
+  it('lists tracked files and searches them literally', async () => {
+    const { ws } = await pythonRepo()
+    assert.deepEqual((await ws.listFiles()).sort(), ['-n.txt', '.gitignore', 'src/pricing.py'])
+    assert.equal(await ws.search('return a - b'), 'src/pricing.py:2:    return a - b\n')
+    // Regex characters are literal, and no match is an empty answer, not an error.
+    assert.equal(await ws.search('a.*b'), '')
+    // A pattern that looks like a flag is still a pattern.
+    assert.equal(await ws.search('-n'), '')
+    assert.match(await ws.search('flag'), /^-n\.txt:1:a file named like a flag/)
+  })
+})

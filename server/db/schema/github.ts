@@ -12,6 +12,12 @@ export const githubInstallations = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     githubInstallationId: bigint('github_installation_id', { mode: 'number' }).notNull(),
     accountLogin: text('account_login').notNull(),
+    /**
+     * GitHub's numeric id for the account. It is what links an installation to the
+     * Adamant user who signed in with that account (user_identities.provider_user_id);
+     * a login can be renamed. Null on rows written before it was recorded.
+     */
+    accountGithubId: bigint('account_github_id', { mode: 'number' }),
     // 'User' or 'Organization' from GitHub. Not checked: the webhook stores
     // whatever the payload says, and GitHub may add account types.
     accountType: text('account_type').notNull(),

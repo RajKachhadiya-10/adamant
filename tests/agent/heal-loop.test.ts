@@ -62,6 +62,9 @@ function fakeGit(journal: Journal, overrides: Partial<GitProvider> = {}): GitPro
       fromLog === 'src/sum.ts'
         ? { path: 'src/sum.ts', text: 'export function sum(a, b) {\n  return a - b\n}\n' }
         : null,
+    resetToBase: async () => {},
+    listFiles: async () => ['package.json', 'src/sum.ts'],
+    search: async () => '',
     ...overrides,
   }
 }
@@ -135,7 +138,7 @@ describe('autonomous heal loop', () => {
     assert.deepEqual(log.merged, [77])
     assert.deepEqual(
       recorder.audits.map((row) => row.eventType),
-      ['run.retrieved', 'run.merged'],
+      ['run.retrieved', 'run.sandboxed', 'run.pr_opened', 'run.merged'],
     )
   })
 

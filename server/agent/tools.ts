@@ -17,6 +17,9 @@ export const ALLOWED_GIT_TOOLS = [
   'merge_pull_request',
   'get_failure_logs',
   'git_read_file',
+  'git_list_files',
+  'git_search',
+  'git_reset',
 ] as const
 
 export type GitToolName = (typeof ALLOWED_GIT_TOOLS)[number]
@@ -126,6 +129,20 @@ export class SecureGitClient {
   /** Read-only and confined to the run's worktree by the provider. Content is not logged. */
   async readFile(fromLog: string): Promise<{ path: string; text: string } | null> {
     return this.guarded('git_read_file', { path: fromLog }, () => this.git.readFile(fromLog))
+  }
+
+  /** Undoes a candidate the agent tried, so its next read sees the original code. */
+  async resetToBase(): Promise<void> {
+    await this.guarded('git_reset', {}, () => this.git.resetToBase())
+  }
+
+  async listFiles(): Promise<string[]> {
+    return this.guarded('git_list_files', {}, () => this.git.listFiles())
+  }
+
+  /** The text is logged; matches are not, as file contents are not. */
+  async search(text: string): Promise<string> {
+    return this.guarded('git_search', { text }, () => this.git.search(text))
   }
 
   /** Named dispatch for anything that reaches the gateway by name. Fails closed. */

@@ -26,6 +26,12 @@ export interface GitProvider {
    * Confined to the worktree; null when nothing there matches.
    */
   readFile(fromLog: string): Promise<{ path: string; text: string } | null>
+  /** Back to the checked-out base with no candidate applied. */
+  resetToBase(): Promise<void>
+  /** Tracked files in the run's checkout. */
+  listFiles(): Promise<string[]>
+  /** Lines of tracked files containing `text` literally, as `path:line:content`. */
+  search(text: string): Promise<string>
 }
 
 /** A window of a file the failure points at, so the model edits what is there. */
@@ -93,4 +99,9 @@ export interface AgentDependencies {
   readonly sandbox: SandboxProvider
   readonly llm: LlmProvider
   readonly recorder: RunRecorder
+  /**
+   * Read just before the merge, so a mode switched mid-heal still counts. False leaves
+   * the PR open for review. Absent means merge, as the product does by default.
+   */
+  readonly autoMerge?: () => Promise<boolean>
 }

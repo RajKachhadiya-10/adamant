@@ -30,6 +30,12 @@ export type GithubInstallRouteOptions = {
   listRepositories: ListInstalledRepositories
   /** Read at request time so a missing slug is a 503, not a URL with an empty segment. */
   readAppSlug?: () => string | undefined
+  /**
+   * Asks the worker to read installations from GitHub. Called while the CLI waits on a
+   * repository that is not bound yet, so a lost `installation` webhook does not leave
+   * it waiting. Failures are swallowed: the status answer stands without it.
+   */
+  requestSync?: () => Promise<void>
 }
 
 /**
@@ -88,7 +94,10 @@ export function createGithubInstallRoute(
     }
 
     const found = await options.findRepository(owner, name)
-    if (!found) return c.json({ error: 'Adamant is not installed on this repository.' }, 404)
+    if (!found) {
+      await options.requestSync?.().catch(() => {})
+      return c.json({ error: 'Adamant is not installed on this repository.' }, 404)
+    }
 
     const body = GithubInstallationStatusSchema.safeParse({
       owner: found.owner,

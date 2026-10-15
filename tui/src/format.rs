@@ -14,7 +14,14 @@ pub enum Tone {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Out {
     Ask(String),
-    Line { tone: Tone, text: String },
+    /// The agent's reply. It grows while the reply streams and may hold newlines.
+    Agent(String),
+    Line {
+        tone: Tone,
+        text: String,
+    },
+    /// "Worked for 7s • 12:53 PM" under a finished turn.
+    Worked(String),
 }
 
 impl Out {
@@ -28,7 +35,7 @@ impl Out {
     pub fn plain(&self) -> String {
         match self {
             Out::Ask(text) => format!("> {text}"),
-            Out::Line { text, .. } => text.clone(),
+            Out::Agent(text) | Out::Line { text, .. } | Out::Worked(text) => text.clone(),
         }
     }
 }
@@ -112,33 +119,168 @@ pub fn format_user(user: &User) -> Vec<Out> {
     ]
 }
 
-pub fn format_activity(event: &SseEvent) -> String {
-    let payload: Value = serde_json::from_str(&event.data).unwrap_or(Value::Null);
-    let when = payload
-        .get("createdAt")
-        .or_else(|| payload.get("receivedAt"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let name = event
-        .event
-        .as_deref()
-        .and_then(|kind| kind.split_once(':').map(|(_, rest)| rest))
-        .unwrap_or(event.event.as_deref().unwrap_or("event"));
-    let run = payload.get("runId").and_then(Value::as_str).unwrap_or("");
-    let extra = if !run.is_empty() {
-        short_id(run).to_string()
-    } else {
-        payload
-            .get("processingStatus")
+/// One feed event as a heal status line, or `None` for deliveries the audit
+/// events already describe (every workflow_run and pull_request webhook).
+pub fn activity_line(event: &SseEvent) -> Option<Out> {
+    let data: Value = serde_json::from_str(&event.data).unwrap_or(Value::Null);
+    let kind = event.event.as_deref().unwrap_or("event");
+    let (source, name) = kind.split_once(':').unwrap_or(("", kind));
+    let when = clock(
+        data.get("createdAt")
+            .or_else(|| data.get("receivedAt"))
             .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    };
-    if extra.is_empty() {
-        format!("{}  {name}", clock(when))
-    } else {
-        format!("{}  {name}  {extra}", clock(when))
+            .unwrap_or(""),
+    );
+    if source == "webhook" {
+        return match name {
+            "workflow_run" | "pull_request" | "ping" => None,
+            other => Some(Out::line(
+                Tone::Muted,
+                format!("{when}  GitHub sent {}", other.replace('_', " ")),
+            )),
+        };
     }
+    let run = short_id(data.get("runId").and_then(Value::as_str).unwrap_or("")).to_string();
+    let detail = data.get("payload").cloned().unwrap_or(Value::Null);
+    let text = |key: &str| detail.get(key).and_then(Value::as_str).map(str::to_string);
+    let number = |key: &str| detail.get(key).and_then(Value::as_i64);
+    let pr = number("prNumber")
+        .map(|n| format!("PR #{n}"))
+        .unwrap_or_else(|| "the PR".into());
+    let (tone, line) = match name {
+        "run.queued" => {
+            let repo = text("repository")
+                .map(|repo| format!(" · {repo}"))
+                .unwrap_or_default();
+            let sha = text("sourceSha")
+                .map(|sha| format!(" @ {}", short_id(&sha).chars().take(7).collect::<String>()))
+                .unwrap_or_default();
+            // The worker's sync found a red build GitHub never sent a webhook for.
+            let via = if text("via").as_deref() == Some("sync") {
+                " (found by sync)"
+            } else {
+                ""
+            };
+            (Tone::Accent, format!("● Heal {run} queued{repo}{sha}{via}"))
+        }
+        "run.started" => {
+            let retry = detail.get("retry").and_then(Value::as_bool) == Some(true);
+            (
+                Tone::Normal,
+                format!("  {run} started{}", if retry { " again" } else { "" }),
+            )
+        }
+        "run.retrieved" => {
+            let at = text("location")
+                .map(|at| format!(" at {at}"))
+                .unwrap_or_default();
+            (Tone::Normal, format!("  {run} read the failing log{at}"))
+        }
+        "run.sandboxed" => {
+            let attempt = number("attempt").unwrap_or(1);
+            match text("verdict").as_deref() {
+                Some("pass") => (
+                    Tone::Success,
+                    format!("  {run} attempt {attempt}: sandbox passed"),
+                ),
+                verdict => (
+                    Tone::Muted,
+                    format!(
+                        "  {run} attempt {attempt}: sandbox {}, trying again",
+                        verdict.unwrap_or("failed")
+                    ),
+                ),
+            }
+        }
+        "run.pr_opened" => {
+            let url = text("prUrl")
+                .map(|url| format!("  {url}"))
+                .unwrap_or_default();
+            (Tone::Link, format!("  {run} opened {pr}{url}"))
+        }
+        "run.investigated" => (
+            Tone::Normal,
+            format!("  {run} read the code and named the cause"),
+        ),
+        "run.agent_tried" => {
+            let verdict = text("verdict")
+                .map(|verdict| format!(": {verdict}"))
+                .unwrap_or_default();
+            (
+                Tone::Muted,
+                format!("  {run} tried a fix in the sandbox{verdict}"),
+            )
+        }
+        // Manual mode: the heal stops at an open PR until the user merges or closes it.
+        "run.awaiting_review" => {
+            let url = text("prUrl")
+                .map(|url| format!("  {url}"))
+                .unwrap_or_default();
+            (
+                Tone::Link,
+                format!("● {run} opened {pr} for your review{url}"),
+            )
+        }
+        // The status change that goes with run.awaiting_review.
+        "run.awaiting_hitl" => return None,
+        "run.aborted" => (
+            Tone::Muted,
+            format!("✗ {run} {pr} was closed without merging"),
+        ),
+        "run.merged" if text("by").as_deref() == Some("review") => {
+            (Tone::Success, format!("✓ {run} {pr} merged by you"))
+        }
+        "run.merged" => (Tone::Success, format!("✓ {run} merged {pr}")),
+        "run.succeeded" => (Tone::Success, format!("✓ Heal {run} succeeded")),
+        "run.failed" => {
+            let why = text("reason")
+                .map(|why| format!(": {}", brief(&why, 160)))
+                .unwrap_or_default();
+            (Tone::Error, format!("✗ Heal {run} failed{why}"))
+        }
+        "run.gave_up" => {
+            let attempts = number("attempts").unwrap_or(0);
+            (
+                Tone::Error,
+                format!("✗ {run} gave up after {attempts} attempt(s) without a passing sandbox"),
+            )
+        }
+        "run.publish_failed" => {
+            let why = text("error")
+                .map(|why| format!(": {}", brief(&why, 160)))
+                .unwrap_or_default();
+            (Tone::Error, format!("✗ {run} could not open the PR{why}"))
+        }
+        "run.merge_failed" => {
+            let why = text("error")
+                .map(|why| format!(": {}", brief(&why, 160)))
+                .unwrap_or_default();
+            (Tone::Error, format!("✗ {run} could not merge {pr}{why}"))
+        }
+        "pull_request.merged" => {
+            if detail.get("ours").and_then(Value::as_bool) == Some(true) {
+                (Tone::Muted, format!("  GitHub confirmed the merge of {pr}"))
+            } else {
+                (
+                    Tone::Muted,
+                    format!("  {pr} merged on GitHub (not an Adamant heal)"),
+                )
+            }
+        }
+        other if run.is_empty() => (Tone::Normal, format!("  {other}")),
+        other => (Tone::Normal, format!("  {run} {other}")),
+    };
+    Some(Out::line(tone, format!("{when}  {line}")))
+}
+
+/// When the event happened, for dropping the history a quiet watch replays.
+pub fn activity_ms(event: &SseEvent) -> Option<i64> {
+    let data: Value = serde_json::from_str(&event.data).ok()?;
+    let at = data
+        .get("createdAt")
+        .or_else(|| data.get("receivedAt"))
+        .and_then(Value::as_str)?;
+    parse_unix_ms(at)
 }
 
 pub fn now_ms() -> i64 {
@@ -166,6 +308,48 @@ pub fn ago(iso: &str, now_ms: i64) -> String {
     }
 }
 
+/// "7s", "1m 05s", "1h 02m 03s", as Codex counts a turn.
+pub fn elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {:02}m {:02}s", secs / 3600, secs / 60 % 60, secs % 60)
+    }
+}
+
+/// The wall clock as "12:53 PM", in local time.
+#[cfg(unix)]
+pub fn local_clock() -> String {
+    // SAFETY: time and localtime_r only write into values this function owns.
+    let tm = unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&now, &mut tm).is_null() {
+            return String::new();
+        }
+        tm
+    };
+    twelve_hour(tm.tm_hour as u32, tm.tm_min as u32)
+}
+
+/// UTC: std has no time zones, and this is only a label.
+#[cfg(not(unix))]
+pub fn local_clock() -> String {
+    let secs = (now_ms() / 1000).max(0) as u64;
+    twelve_hour((secs / 3600 % 24) as u32, (secs / 60 % 60) as u32)
+}
+
+fn twelve_hour(hour: u32, minute: u32) -> String {
+    let half = if hour < 12 { "AM" } else { "PM" };
+    let hour = match hour % 12 {
+        0 => 12,
+        other => other,
+    };
+    format!("{hour}:{minute:02} {half}")
+}
+
 pub fn clock(iso: &str) -> String {
     iso.split_once('T')
         .and_then(|(_, rest)| {
@@ -186,12 +370,16 @@ pub fn short_id(id: &str) -> &str {
 }
 
 pub fn row_count(text: &str, width: usize) -> usize {
-    if text.is_empty() || width == 0 {
+    if width == 0 {
         return 1;
     }
-    unicode_width::UnicodeWidthStr::width(text)
-        .div_ceil(width)
-        .max(1)
+    text.split('\n')
+        .map(|line| {
+            unicode_width::UnicodeWidthStr::width(line)
+                .div_ceil(width)
+                .max(1)
+        })
+        .sum()
 }
 
 pub fn brief(value: &str, max: usize) -> String {
@@ -239,6 +427,148 @@ fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(kind: &str, data: &str) -> SseEvent {
+        SseEvent {
+            id: None,
+            event: Some(kind.into()),
+            data: data.into(),
+        }
+    }
+
+    #[test]
+    fn heal_events_read_as_status() {
+        let queued = event(
+            "audit:run.queued",
+            r#"{"runId":"1a2b3c4d-0000","createdAt":"2026-10-15T09:30:00.000Z","payload":{"repository":"vaish/app","sourceSha":"abcdef1234567890"}}"#,
+        );
+        assert_eq!(
+            activity_line(&queued).unwrap().plain(),
+            "09:30  ● Heal 1a2b3c4d queued · vaish/app @ abcdef1"
+        );
+        let opened = event(
+            "audit:run.pr_opened",
+            r#"{"runId":"1a2b3c4d-0000","createdAt":"2026-10-15T09:31:00.000Z","payload":{"prNumber":12,"prUrl":"https://github.com/vaish/app/pull/12"}}"#,
+        );
+        assert_eq!(
+            activity_line(&opened).unwrap().plain(),
+            "09:31    1a2b3c4d opened PR #12  https://github.com/vaish/app/pull/12"
+        );
+        let merged = event(
+            "audit:run.merged",
+            r#"{"runId":"1a2b3c4d-0000","createdAt":"2026-10-15T09:32:00.000Z","payload":{"prNumber":12}}"#,
+        );
+        assert_eq!(
+            activity_line(&merged),
+            Some(Out::line(Tone::Success, "09:32  ✓ 1a2b3c4d merged PR #12"))
+        );
+        let delivery = event(
+            "webhook:workflow_run",
+            r#"{"receivedAt":"2026-10-15T09:29:00.000Z"}"#,
+        );
+        assert_eq!(activity_line(&delivery), None);
+        assert!(activity_ms(&merged).unwrap() > activity_ms(&delivery).unwrap());
+    }
+
+    fn line(kind: &str, payload: &str) -> Option<Out> {
+        activity_line(&event(
+            kind,
+            &format!(
+                r#"{{"runId":"1a2b3c4d-0000","createdAt":"2026-10-15T09:40:00.000Z","payload":{payload}}}"#
+            ),
+        ))
+    }
+
+    #[test]
+    fn manual_mode_heals_wait_for_review() {
+        assert_eq!(
+            line(
+                "audit:run.awaiting_review",
+                r#"{"prNumber":12,"prUrl":"https://github.com/vaish/app/pull/12"}"#
+            ),
+            Some(Out::line(
+                Tone::Link,
+                "09:40  ● 1a2b3c4d opened PR #12 for your review  https://github.com/vaish/app/pull/12"
+            ))
+        );
+        assert_eq!(
+            line("audit:run.awaiting_review", "{}").unwrap().plain(),
+            "09:40  ● 1a2b3c4d opened the PR for your review"
+        );
+        assert_eq!(line("audit:run.awaiting_hitl", r#"{"prNumber":12}"#), None);
+        assert_eq!(
+            line(
+                "audit:run.aborted",
+                r#"{"prNumber":12,"reason":"pr_closed"}"#
+            ),
+            Some(Out::line(
+                Tone::Muted,
+                "09:40  ✗ 1a2b3c4d PR #12 was closed without merging"
+            ))
+        );
+        assert_eq!(
+            line("audit:run.merged", r#"{"prNumber":12,"by":"review"}"#),
+            Some(Out::line(
+                Tone::Success,
+                "09:40  ✓ 1a2b3c4d PR #12 merged by you"
+            ))
+        );
+        assert_eq!(
+            line("audit:run.merged", r#"{"prNumber":12,"by":"agent"}"#)
+                .unwrap()
+                .plain(),
+            "09:40  ✓ 1a2b3c4d merged PR #12"
+        );
+    }
+
+    #[test]
+    fn sync_and_sandbox_tries_read_as_status() {
+        assert_eq!(
+            line(
+                "audit:run.queued",
+                r#"{"repository":"vaish/app","sourceSha":"abcdef1234567890","via":"sync"}"#
+            )
+            .unwrap()
+            .plain(),
+            "09:40  ● Heal 1a2b3c4d queued · vaish/app @ abcdef1 (found by sync)"
+        );
+        assert_eq!(
+            line("audit:run.queued", r#"{"via":"webhook"}"#)
+                .unwrap()
+                .plain(),
+            "09:40  ● Heal 1a2b3c4d queued"
+        );
+        assert_eq!(
+            line(
+                "audit:run.agent_tried",
+                r#"{"try":2,"verdict":"did not apply"}"#
+            ),
+            Some(Out::line(
+                Tone::Muted,
+                "09:40    1a2b3c4d tried a fix in the sandbox: did not apply"
+            ))
+        );
+        assert_eq!(
+            line("audit:run.agent_tried", r#"{"try":1}"#)
+                .unwrap()
+                .plain(),
+            "09:40    1a2b3c4d tried a fix in the sandbox"
+        );
+        assert_eq!(
+            line("audit:run.investigated", "{}").unwrap().plain(),
+            "09:40    1a2b3c4d read the code and named the cause"
+        );
+    }
+
+    #[test]
+    fn counts_a_turn_like_codex() {
+        assert_eq!(elapsed(3), "3s");
+        assert_eq!(elapsed(65), "1m 05s");
+        assert_eq!(elapsed(3723), "1h 02m 03s");
+        assert_eq!(twelve_hour(0, 5), "12:05 AM");
+        assert_eq!(twelve_hour(12, 53), "12:53 PM");
+        assert_eq!(twelve_hour(23, 0), "11:00 PM");
+    }
 
     #[test]
     fn formats_age_from_iso() {

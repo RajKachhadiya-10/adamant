@@ -41,7 +41,8 @@ The API authenticates and ACKs. It does **not** run models or Docker. Workers
 | ------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | Hosted App + worker, CLI attached to that API, sandbox, merge our heal PR | Electron Heal, OAuth, HITL, agent-on-checkout, fingerprints |
 
-Auth today: webhook HMAC. A session row for the CLI and `POST /runs`:
+Auth today: webhook HMAC for GitHub, and a session for the CLI and
+`POST /runs`, from `/login` (GitHub OAuth, below). For scripts,
 `pnpm --filter @adamant/server session:create` adds a `sessions` row and
 prints its token once.
 
@@ -65,11 +66,16 @@ A merge never starts a heal. Red CI does.
 Webhook URL: `https://<hosted>/webhooks/github`. Smee or ngrok only when
 the API is not hosted yet.
 
-### CLI (monitor)
+### CLI
 
-`@adamant/cli` on the laptop, **always pointed at the hosted API**
-(`ADAMANT_API_URL` + `ADAMANT_SESSION`). Read-only. It stays connected
-(`watch` = SSE, reconnect on drop). Closing the CLI does not stop heals.
+The `adamant` terminal (`tui/`) on the laptop, **always pointed at the hosted API**
+(`ADAMANT_API_URL` + `ADAMANT_SESSION`). It follows the feed from launch
+(SSE, reconnect on drop; history from before launch is skipped) and its own
+coding agent works on the local checkout. Closing the CLI does not stop heals.
+
+The graph writes `run.retrieved`, `run.sandboxed` (each attempt's verdict),
+`run.pr_opened` and `run.merged` to `audit_events`, and the webhook's
+`run.queued` names the repository, so the feed shows every step of a heal.
 
 | Command                          | Hosted API                                                          |
 | -------------------------------- | ------------------------------------------------------------------- |
@@ -85,18 +91,22 @@ does not hold the slug, a private key, or an installation token. Without
 Postgres the API says install confirmation needs the hosted API; it does not
 read the in-memory schema maps.
 
-No OpenAI key, no GitHub token, no merge from the CLI. Until the API is
-hosted, the CLI defaults to `http://localhost:8787`; switch the default to
-the hosted origin once it exists.
+No GitHub token and no merge from the CLI. Its agent calls the model with
+the user's own key, which never reaches the API, the worker or a command the
+agent runs, and it can start a heal only through `POST /runs` like any session.
+The repository picker reads the user's repositories with their local `gh`
+login; that token stays inside `gh`. Until the API is hosted, the CLI defaults
+to `http://localhost:8787`; switch the default to the hosted origin once it
+exists.
 
 ## Identity
 
 Two principals. Do not mix their tokens.
 
-| Principal               | Authenticates how                      | Purpose                               |
-| ----------------------- | -------------------------------------- | ------------------------------------- |
-| User                    | Seeded session now; GitHub OAuth later | CLI + `POST /runs`                    |
-| GitHub App installation | HMAC + per-call installation token     | What the agent may do on a bound repo |
+| Principal               | Authenticates how                   | Purpose                               |
+| ----------------------- | ----------------------------------- | ------------------------------------- |
+| User                    | Session from GitHub or Google OAuth | CLI + `POST /runs`                    |
+| GitHub App installation | HMAC + per-call installation token  | What the agent may do on a bound repo |
 
 Installation tokens are minted per call. They are never stored in the CLI,
 Electron, sessions, checkpoints, prompts, or the sandbox.
@@ -106,15 +116,74 @@ created.
 
 ## Auth
 
-| Route                              | Auth                  | Does                                            |
-| ---------------------------------- | --------------------- | ----------------------------------------------- |
-| GitHub webhook                     | `X-Hub-Signature-256` | Insert `webhook_deliveries`; maybe create a run |
-| `POST /runs`                       | Seeded session        | Start a run                                     |
-| `GET /runs`                        | Seeded session        | CLI list                                        |
-| `GET /runs/:id`                    | Seeded session        | CLI detail                                      |
-| `GET /activity`                    | Seeded session        | CLI watch (deliveries + audit, newest first)    |
-| `GET /github/install`              | Session               | Public install URL from `GITHUB_APP_SLUG`       |
-| `GET /github/installations/status` | Session               | Exact `repositories` owner and name, or 404     |
+| Route                               | Auth                  | Does                                            |
+| ----------------------------------- | --------------------- | ----------------------------------------------- |
+| GitHub webhook                      | `X-Hub-Signature-256` | Insert `webhook_deliveries`; maybe create a run |
+| `POST /runs`                        | Session               | Start a run                                     |
+| `GET /runs`                         | Session               | CLI list                                        |
+| `GET /runs/:id`                     | Session               | CLI detail                                      |
+| `GET /activity`                     | Session               | CLI watch (deliveries + audit, newest first)    |
+| `GET /github/install`               | Session               | Public install URL from `GITHUB_APP_SLUG`       |
+| `GET /github/installations/status`  | Session               | Exact `repositories` owner and name, or 404     |
+| `GET /auth/{github,google}`         | None, rate-limited    | Browser sign-in: state + PKCE, redirect         |
+| `POST /auth/github/cli/start`       | None, rate-limited    | Start a terminal sign-in (below)                |
+| `GET /auth/github/cli/begin`        | None, rate-limited    | The terminal's browser link to GitHub           |
+| `GET/POST /auth/github/cli/confirm` | Confirmation cookie   | Show the code; confirm or cancel                |
+| `POST /auth/github/cli/token`       | Poll secret           | 202 until confirmed, then the token once        |
+
+A session is a random token sent as `Authorization: Bearer` (or the
+`adamant_session` cookie for a browser); Postgres keeps its SHA-256 only. A
+session lookup that cannot reach Postgres answers 503 "The database is
+unavailable", not 401 or 500, so a client retries instead of signing out.
+
+### Sign-in
+
+Every authorize redirect carries a fresh `state` (also an HttpOnly cookie
+scoped to the callback) and a PKCE S256 challenge. The verifier is a new
+column on that `oauth_states` row; the callback deletes the row (one use, 15
+minutes) and sends the verifier only in the token exchange body, never in a
+URL or a log. GitHub is asked for `user:email` only: `/user` gives the
+numeric id and login, `/user/emails` the verified primary address. No
+provider token is kept.
+
+The terminal signs in through the browser, device-flow style:
+
+1. `POST /auth/github/cli/start` returns a login id, a poll secret and a
+   code (`XXXX-XXXX`, RFC 8628's no-vowel alphabet). The terminal prints
+   "Confirm the code XXXX-XXXX in your browser" and opens `beginPath`.
+2. `begin` makes the OAuth state and binds it to the login (opening the
+   link again rebinds it). After GitHub, the callback names the user but
+   mints no session: it sets an HttpOnly `adamant_cli_confirm` cookie and
+   redirects to `/auth/github/cli/confirm`.
+3. That page shows the code with "This is the code in my terminal" and
+   "Cancel". It runs no script, cannot be framed (`frame-ancestors 'none'`,
+   `X-Frame-Options: DENY`), escapes what it renders, and never holds the
+   poll secret, the cookie or a token. Its POST must carry the cookie
+   (SameSite=Lax) and a form token derived from it, and must not be
+   cross-site (`Sec-Fetch-Site`).
+4. The terminal polls `POST /auth/github/cli/token`. Only after the
+   confirmation does one poll get a token, minted then; a cancel, a decline
+   at GitHub or a failed callback answers 403, an unknown or expired login 404.
+
+So a sign-in link sent to someone else shows them a code that matches no
+terminal of theirs, and nothing reaches the sender's terminal unless they
+confirm it anyway.
+
+Logins live in `cli_logins` (`server/db/schema/cliLogins.ts`), so a restart
+(`node --watch`) or another instance can answer any step: status
+`pending` → `authorized` → `confirmed` → `consumed`, or `cancelled`, the user
+id once GitHub has named one, and SHA-256 hashes of the login id, the poll secret,
+the bound OAuth state and the confirmation cookie. "Issued once" is the
+poll's `UPDATE … WHERE status = 'confirmed' RETURNING user_id`. Expired rows
+go with expired OAuth states in the worker's hourly `cleanup_oauth_states`.
+Tests use the in-memory store behind the same interface.
+
+The unauthenticated routes that write a row (`/auth/{github,google}`,
+`cli/start`, `cli/begin`) share a token bucket per client address (IPv6 by
+/64): 20 at once, 20 a minute. It lives in each API process, so N instances
+allow N times that, and it reads the TCP peer, not `X-Forwarded-For`;
+behind a proxy every client shares the proxy's bucket, so limit at the
+proxy too.
 
 Webhook: known `installation_id`, bind the repo, insert
 `webhook_deliveries` **before** the run. Duplicate `delivery_id` → ACK, no
@@ -130,9 +199,9 @@ its own delivery, and the heal already reads every failed job at that SHA.
 
 HITL (`POST /runs/:id/hitl`) is later. The heal merges without it.
 
-When you add Electron login later: PKCE in main, session secret in
-`safeStorage`, Postgres stores `sessions.token_hash` only, renderer never
-sees the secret. Then `POST /runs` also checks collaborator access (401 /
+When you add Electron login later: PKCE in main (its own, for a public
+client), session secret in `safeStorage`, Postgres stores
+`sessions.token_hash` only, renderer never sees the secret. Then `POST /runs` also checks collaborator access (401 /
 403 / 404).
 
 ## Workers
@@ -241,6 +310,59 @@ Read and wait. Do not treat Actions as the sandbox.
 Detached worktree, remotes and credentials stripped. May `diff` / `log`.
 Cannot `push`, `fetch`, or see `GIT_ASKPASS`.
 
+### Heal agents (OpenAI Agents SDK)
+
+With `ADAMANT_HEAL_AGENT=agents` (the default; `classic` opts out) the
+diagnose, plan and patch steps are Agents SDK agents
+(`server/agent/autonomous.ts`) instead of one model call each. They call
+four tools, nothing else; `ALLOWED_AGENT_TOOLS` is the list:
+
+| Tool         | Goes through                          | Logged as                              |
+| ------------ | ------------------------------------- | -------------------------------------- |
+| `list_files` | gateway → `git ls-files`              | `git_list_files`                       |
+| `read_file`  | gateway → worktree read (confined)    | `git_read_file` (path, not contents)   |
+| `search`     | gateway → `git grep --fixed-strings`  | `git_search` (the text, not matches)   |
+| `try_patch`  | gateway apply → sandbox → `git_reset` | `git_apply_patch`, `sandbox_try_patch` |
+
+`try_patch` applies a candidate to the clean base, runs the sandbox, and
+resets, at most three times per candidate; each try is an
+`run.agent_tried` audit event. A try is evidence for the model only: the
+graph applies the diff the fixer returns, runs the sandbox itself, writes
+`sandbox_results`, and the push / PR / merge gates read that row as before.
+Tool output is redacted and bounded. Tracing to OpenAI is off. A broken
+investigator run falls back to the one-shot provider; a fixer that runs out
+of turns spends the attempt.
+
+### Finding work without webhooks
+
+GitHub does not redeliver a delivery that failed or went to the wrong URL.
+The worker's `sync_github` task (every minute, at boot, and when the CLI is
+waiting on an install) reads the App's installations and repositories,
+binds them, and queues a heal when a default branch's newest commit has a
+failed workflow, with the webhook's idempotency key
+(`workflow_run:{sha}`), so the two paths never heal one commit twice. It
+also settles runs left for review (below). `server/worker/doctor.ts` reads
+the App's webhook settings at boot and from `scripts/adamant` and says when
+the App sends to a channel this machine does not forward, or has no secret.
+
+### Merge mode
+
+The terminal's approval mode is saved on the user (`users.auto_merge`,
+`PUT /settings`). Just before the merge the worker reads the mode of the
+run's creator, else of the user signed in with the GitHub account that
+owns the repository (`github_installations.account_github_id`), else
+merges. Manual leaves the PR open: the run ends `awaiting_hitl` with a
+`run.awaiting_review` event, and the sync marks it `succeeded` when someone
+merges the PR or `aborted` when it is closed.
+
+### Sandbox profile
+
+The sandbox commands come from the checkout: a repository with a
+`package.json` uses `ADAMANT_SANDBOX_*`; one with Python packaging runs in
+`python:<CI version>-slim` with a venv in the worktree
+(`.adamant-venv`, excluded from the run's git) and `pytest`.
+`ADAMANT_SANDBOX_PROFILE=fixed` turns detection off.
+
 ## Run state
 
 ```mermaid
@@ -248,6 +370,9 @@ stateDiagram-v2
   [*] --> queued
   queued --> running
   running --> succeeded: sandbox passed and this run's PR merged
+  running --> awaiting_hitl: manual mode, PR open for review
+  awaiting_hitl --> succeeded: someone merged the PR
+  awaiting_hitl --> aborted: the PR was closed
   running --> failed
 ```
 

@@ -32,7 +32,7 @@ type RepositoryPayload = {
 
 type InstallationPayload = {
   id?: number
-  account?: { login?: string; type?: string }
+  account?: { id?: number; login?: string; type?: string }
 }
 
 type EventPayload = {
@@ -110,10 +110,12 @@ export function createWebhookService(deps: WebhookDependencies) {
     const installationId = payload.installation?.id
     if (!installationId) return { installationRowId: null, repositoryRowId: null }
 
+    const accountGithubId = payload.installation?.account?.id
     const installationRowId = await store.upsertInstallation({
       githubInstallationId: installationId,
       accountLogin: payload.installation?.account?.login ?? 'unknown',
       accountType: payload.installation?.account?.type ?? 'Organization',
+      ...(typeof accountGithubId === 'number' ? { accountGithubId } : {}),
     })
 
     const listed = [
@@ -175,7 +177,12 @@ export function createWebhookService(deps: WebhookDependencies) {
 
     if (!created) return null
 
-    await store.recordAudit(created, 'run.queued', { deliveryId, sourceSha: headSha })
+    // The feed carries no repository rows; the name lets `adamant watch` say where.
+    await store.recordAudit(created, 'run.queued', {
+      deliveryId,
+      sourceSha: headSha,
+      ...(payload.repository?.full_name ? { repository: payload.repository.full_name } : {}),
+    })
     return created
   }
 

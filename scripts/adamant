@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
-# Start the local API and worker, then the terminal CLI (not the Electron app).
+# Start the local API and worker, then the Rust terminal in tui/ (not the
+# Electron app).
 #
 # One-time PATH install, without sudo and without editing the shell rc:
 #   ./scripts/adamant install
 # That links this file into a writable directory already on PATH (~/.local/bin,
 # or `pnpm bin -g` when that directory exists and is writable) only when the
 # name `adamant` is free. If `command -v adamant` already points at another
-# binary — the CLI package bin from `npm link` is the usual case — install
+# binary (`cargo install --path tui` puts one in ~/.cargo/bin), install
 # leaves it alone and prints this script's path. Running ./scripts/adamant
 # does not require that install. `install owner/repo` is not this PATH link:
-# it is the CLI's GitHub App install and is forwarded like any other command.
+# it is the terminal's GitHub App install and is forwarded like any other command.
 #
-#   ./scripts/adamant              # API + worker, then the CLI
-#   ./scripts/adamant status       # forwarded to the CLI as /status
+#   ./scripts/adamant              # API + worker, then the terminal
+#   ./scripts/adamant status       # forwarded to the terminal as /status
 #   ./scripts/adamant install owner/repo
 #   ./scripts/adamant down         # stop API/worker this launcher started
 #
-# The root package.json script "adamant" stays the CLI-only entry
-# (`pnpm --filter @adamant/cli start`). A second script with that name would
-# hide it.
+# With ADAMANT_WEBHOOK_PROXY_URL (a smee.io channel) in the environment or in
+# .env, it also keeps a smee forwarder from that channel to the local API, so
+# GitHub's webhooks reach this laptop. Point the App's webhook URL at the channel.
+#
+# `pnpm adamant` is the terminal alone, against whatever API is already up.
 
 set -euo pipefail
 
@@ -47,8 +50,12 @@ API_LOG=$LOG_DIR/api.log
 WORKER_LOG=$LOG_DIR/worker.log
 API_PID=$STATE/api.pid
 WORKER_PID=$STATE/worker.pid
+TUNNEL_LOG=$LOG_DIR/tunnel.log
+TUNNEL_PID=$STATE/tunnel.pid
 API_PORT=8787
 API_URL=http://localhost:8787
+TUI_MANIFEST=$ROOT/tui/Cargo.toml
+SESSION_FILE=$HOME/.adamant/session
 
 # Set only for processes this invocation spawned, so a failed start does not
 # stop an API or worker that was already running.
@@ -66,8 +73,8 @@ die() {
 
 on_exit() {
   local status=$?
-  # Startup failures only. Once the CLI is about to take the TTY, the API and
-  # worker stay up even if the CLI exits non-zero.
+  # Startup failures only. Once the terminal is about to take the TTY, the API
+  # and worker stay up even if it exits non-zero.
   if [[ "$startup_done" -eq 0 && "$status" -ne 0 ]]; then
     set +e
     [[ "$started_api" -eq 1 ]] && stop_recorded API "$API_PID" api
@@ -111,6 +118,12 @@ looks_like() {
       case $args in
         *dev:worker*|*"worker/index.ts"*) return 1 ;;
         *api/index.ts*|*"@adamant/server dev"*) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    tunnel)
+      case $args in
+        *smee*) ;;
         *) return 1 ;;
       esac
       ;;
@@ -199,7 +212,7 @@ stop_recorded() {
   printf 'adamant: stopped %s (pid %s)\n' "$name" "$pid" >&2
 }
 
-# Detach so the CLI's terminal session does not signal these long-lived processes.
+# Detach so the terminal's session does not signal these long-lived processes.
 start_logged() {
   local pidfile=$1 logfile=$2
   shift 2
@@ -277,6 +290,34 @@ ensure_api() {
   fi
 }
 
+# The environment wins over .env, as for the API and worker.
+webhook_proxy_url() {
+  local url=${ADAMANT_WEBHOOK_PROXY_URL:-}
+  if [[ -z "$url" && -f "$ROOT/.env" ]]; then
+    url=$(sed -n 's/^ADAMANT_WEBHOOK_PROXY_URL=//p' "$ROOT/.env" | tail -n 1)
+    url=${url%\"}
+    url=${url#\"}
+  fi
+  printf '%s' "$url"
+}
+
+ensure_tunnel() {
+  local url
+  url=$(webhook_proxy_url)
+  [[ -n "$url" ]] || return 0
+  case $url in
+    https://smee.io/*) ;;
+    *) die "ADAMANT_WEBHOOK_PROXY_URL must be a https://smee.io/ channel, got: $url" ;;
+  esac
+  if pidfile_is tunnel "$TUNNEL_PID"; then
+    printf 'adamant: forwarding %s to the API\n' "$url" >&2
+    return 0
+  fi
+  start_logged "$TUNNEL_PID" "$TUNNEL_LOG" pnpm dlx smee-client --url "$url" --target "$API_URL/webhooks/github"
+  printf 'adamant: forwarding %s to %s/webhooks/github (pid %s). Log: %s\n' \
+    "$url" "$API_URL" "$started_pid" "$TUNNEL_LOG" >&2
+}
+
 ensure_worker() {
   if worker_running; then
     printf 'adamant: worker already running for this checkout\n' >&2
@@ -296,9 +337,45 @@ ensure_worker() {
   fi
 }
 
+# Says what keeps GitHub's webhooks from arriving: a smee channel the App does not
+# send to, or an App with no webhook secret (every delivery would be a 401). Heals
+# still start from the worker's minute sync; this is about the instant ones. Never
+# fatal, and bounded so a slow GitHub cannot hold the terminal's start.
+check_github_app() {
+  local out
+  out=$(cd "$ROOT/server" && timeout_cmd 10 node --env-file-if-exists=../.env \
+    --experimental-strip-types worker/doctor.ts 2>&1) || true
+  [[ -n "$out" ]] || return 0
+  printf '%s\n' "$out" >&2
+}
+
+timeout_cmd() {
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+  else
+    "$@" &
+    local pid=$!
+    ( sleep "$seconds"; kill "$pid" 2>/dev/null ) &
+    local watchdog=$!
+    wait "$pid"
+    local status=$?
+    kill "$watchdog" 2>/dev/null
+    return "$status"
+  fi
+}
+
 ensure_session() {
   if [[ -n ${ADAMANT_SESSION:-} ]]; then
     printf 'adamant: using ADAMANT_SESSION from the environment\n' >&2
+    return 0
+  fi
+  # /login in the terminal stores its session here. Minting one would shadow it.
+  if [[ -s "$SESSION_FILE" ]]; then
+    printf 'adamant: using the session in ~/.adamant/session\n' >&2
     return 0
   fi
   local err token
@@ -307,7 +384,7 @@ ensure_session() {
   if ! token=$(
     cd "$ROOT" && pnpm --silent --filter @adamant/server session:create 2>"$err"
   ); then
-    printf 'adamant: could not mint a CLI session.\n' >&2
+    printf 'adamant: could not mint a terminal session.\n' >&2
     cat "$err" >&2
     rm -f "$err"
     exit 1
@@ -318,9 +395,9 @@ ensure_session() {
       die "session:create did not return a usable token."
       ;;
   esac
-  # Unexported here. The CLI subshell exports it so the API and worker never see it.
+  # Unexported here. The terminal's subshell exports it so the API and worker never see it.
   ADAMANT_SESSION=$token
-  printf 'adamant: minted a CLI session\n' >&2
+  printf 'adamant: minted a terminal session\n' >&2
 }
 
 print_still_up() {
@@ -425,19 +502,27 @@ cmd_down() {
     had=1
     stop_recorded worker "$WORKER_PID" worker
   fi
+  if [[ -f "$TUNNEL_PID" ]]; then
+    had=1
+    stop_recorded tunnel "$TUNNEL_PID" tunnel
+  fi
   if [[ "$had" -eq 0 ]]; then
     printf 'adamant: no pid files in %s. Processes this launcher did not start were left running.\n' "$STATE" >&2
   fi
 }
 
-launch_cli() {
-  # exec inside the subshell so the CLI owns the TTY. The parent stays alive
-  # only to print the still-up note; it does not keep the servers as children
-  # of the terminal's foreground group (they were started with setsid).
-  if [[ $# -eq 0 ]]; then
-    exec pnpm --filter @adamant/cli start
-  fi
-  exec pnpm --filter @adamant/cli start -- "$@"
+build_tui() {
+  # Before anything is spawned, so a compile error leaves nothing running.
+  printf 'adamant: building the terminal (tui/)\n' >&2
+  cargo build --quiet --manifest-path "$TUI_MANIFEST" || die "cargo build failed for $TUI_MANIFEST"
+}
+
+launch_tui() {
+  # exec inside the subshell, and cargo run execs the binary on Unix, so the
+  # terminal owns the TTY. The parent stays alive only to print the still-up
+  # note; it does not keep the servers as children of the terminal's
+  # foreground group (they were started with setsid).
+  exec cargo run --quiet --manifest-path "$TUI_MANIFEST" -- "$@"
 }
 
 cmd_up() {
@@ -449,13 +534,17 @@ cmd_up() {
   command -v pnpm >/dev/null 2>&1 || die "pnpm is required on PATH"
   command -v curl >/dev/null 2>&1 || die "curl is required to check ${API_URL}/health"
   command -v lsof >/dev/null 2>&1 || die "lsof is required to see whether port ${API_PORT} or the worker is already running"
+  command -v cargo >/dev/null 2>&1 || die "cargo is required to build the terminal in tui/"
 
+  build_tui
   ensure_api
   ensure_worker
+  ensure_tunnel
+  check_github_app
 
   if [[ ! -t 0 || ! -t 1 ]]; then
     startup_done=1
-    printf 'adamant: the CLI needs an interactive terminal.\n' >&2
+    printf 'adamant: the terminal UI needs an interactive TTY.\n' >&2
     print_still_up
     exit 1
   fi
@@ -463,11 +552,11 @@ cmd_up() {
   ensure_session
   startup_done=1
   set +e
+  # No cd: the terminal shows the directory it was started from.
   (
-    cd "$ROOT" || exit 1
     export ADAMANT_SESSION
     export ADAMANT_API_URL="$API_URL"
-    launch_cli "$@"
+    launch_tui "$@"
   )
   status=$?
   set -e
@@ -479,7 +568,7 @@ main() {
   local cmd=${1:-}
   case $cmd in
     install)
-      # No arguments: link this launcher onto PATH. owner/repo is the CLI
+      # No arguments: link this launcher onto PATH. owner/repo is the terminal's
       # command that opens the GitHub App install page.
       if [[ $# -eq 1 ]]; then
         cmd_install

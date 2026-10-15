@@ -27,6 +27,9 @@ const mockGit = (overrides: Partial<GitProvider> = {}): GitProvider => ({
   mergePr: async () => {},
   getFailureLogs: async () => 'Error: boom at src/app.ts:10',
   readFile: async () => null,
+  resetToBase: async () => {},
+  listFiles: async () => [],
+  search: async () => '',
   ...overrides,
 })
 
@@ -334,5 +337,116 @@ describe('SecureGitClient Tool Boundary', () => {
       }),
       /Cannot open PR without a passing sandbox result/,
     )
+  })
+})
+
+describe('Approval mode at the merge', () => {
+  const deps = (autoMerge?: () => Promise<boolean>) => {
+    const merged: number[] = []
+    const bodies: string[] = []
+    const base: AgentDependencies & { recorder: MemoryRecorder } = {
+      git: mockGit({
+        openPr: async (_branch, _base, _title, body) => {
+          bodies.push(body)
+          return { number: 7, url: 'https://github.com/test/repo/pull/7' }
+        },
+        mergePr: async (prNumber) => {
+          merged.push(prNumber)
+        },
+      }),
+      sandbox: {
+        runValidation: async () => ({ verdict: 'pass', commands: ['npm test'], output: 'ok' }),
+      } as SandboxProvider,
+      llm: {
+        diagnose: async () => 'add() subtracts instead of adding',
+        plan: async () => 'Use + in add()',
+        patch: async () =>
+          'diff --git a/src/math.ts b/src/math.ts\n--- a/src/math.ts\n+++ b/src/math.ts\n@@ -1 +1 @@\n-export const add = (a, b) => a - b\n+export const add = (a, b) => a + b\n',
+      } as unknown as LlmProvider,
+      recorder: createMemoryRecorder(),
+      ...(autoMerge ? { autoMerge } : {}),
+    }
+    return { deps: base, merged, bodies }
+  }
+
+  it('merges when the owner is in auto mode', async () => {
+    const { deps: d, merged } = deps(async () => true)
+    const finalState = await compileHealGraph(d).invoke({
+      runId: 'run-a',
+      repository,
+      baseSha: 'abc',
+    })
+    assert.strictEqual(finalState.status, 'completed')
+    assert.deepStrictEqual(merged, [7])
+  })
+
+  it('leaves the PR open for review in manual mode', async () => {
+    const { deps: d, merged } = deps(async () => false)
+    const finalState = await compileHealGraph(d).invoke({
+      runId: 'run-m',
+      repository,
+      baseSha: 'abc',
+    })
+    assert.strictEqual(finalState.status, 'awaiting_hitl')
+    assert.deepStrictEqual(merged, [])
+    const review = d.recorder.audits.find((audit) => audit.eventType === 'run.awaiting_review')
+    assert.deepStrictEqual(review?.payload, {
+      prNumber: 7,
+      prUrl: 'https://github.com/test/repo/pull/7',
+    })
+    assert.ok(!d.recorder.audits.some((audit) => audit.eventType === 'run.merged'))
+  })
+
+  it('merges when no mode is wired in, as before', async () => {
+    const { deps: d, merged } = deps()
+    const finalState = await compileHealGraph(d).invoke({
+      runId: 'run-d',
+      repository,
+      baseSha: 'abc',
+    })
+    assert.strictEqual(finalState.status, 'completed')
+    assert.deepStrictEqual(merged, [7])
+  })
+
+  it('reads the mode at the merge, after the sandbox passed', async () => {
+    const order: string[] = []
+    const { deps: d } = deps(async () => {
+      order.push('mode')
+      return false
+    })
+    const sandbox = d.sandbox.runValidation
+    const graph = compileHealGraph({
+      ...d,
+      sandbox: {
+        runValidation: async (input) => {
+          order.push('sandbox')
+          return sandbox(input)
+        },
+      },
+    })
+    await graph.invoke({ runId: 'run-o', repository, baseSha: 'abc' })
+    assert.deepStrictEqual(order, ['sandbox', 'mode'])
+  })
+
+  it('writes a PR description with a summary, the changed files and the Made with Adamant line', async () => {
+    const { deps: d, bodies } = deps(async () => true)
+    await compileHealGraph(d).invoke({
+      runId: 'run-b',
+      repository,
+      baseSha: '4767a01c0ffee',
+    })
+    const body = bodies[0] ?? ''
+    assert.match(
+      body,
+      /^## Summary\nCI failed on `main` at 4767a01 with `Error: boom at src\/app.ts:10`\. This PR fixes it\./,
+    )
+    assert.match(body, /## Changes\n- `src\/math.ts` \(\+1 −1\)/)
+    assert.match(body, /## Cause\nadd\(\) subtracts instead of adding/)
+    assert.match(body, /## Fix\nUse \+ in add\(\)/)
+    assert.match(
+      body,
+      /\[failing commit 4767a01\]\(https:\/\/github.com\/test\/repo\/commit\/4767a01c0ffee\)/,
+    )
+    assert.match(body, /Made with Adamant$/)
   })
 })

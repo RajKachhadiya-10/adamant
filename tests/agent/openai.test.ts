@@ -23,6 +23,9 @@ const git = {
   mergePr: async () => {},
   getFailureLogs: async () => 'Error: boom at src/app.ts:10',
   readFile: async () => null,
+  resetToBase: async () => {},
+  listFiles: async () => [],
+  search: async () => '',
 } as GitProvider
 
 const sandbox = {

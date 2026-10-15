@@ -6,6 +6,8 @@ import {
   githubInstallations,
   repositories,
   runs,
+  userIdentities,
+  users,
   type Db,
 } from '../db/client.ts'
 
@@ -21,11 +23,20 @@ export type HealRun = {
   installationId: string
 }
 
+export type FinishedStatus = 'succeeded' | 'failed' | 'awaiting_hitl'
+
 export type RunStore = {
   loadRun: (runId: string) => Promise<HealRun | null>
   markRunning: (runId: string, retry: boolean) => Promise<boolean>
   /** `reason` is why a run failed outside the graph, such as a missing key. */
-  markFinished: (runId: string, status: 'succeeded' | 'failed', reason?: string) => Promise<void>
+  markFinished: (runId: string, status: FinishedStatus, reason?: string) => Promise<void>
+  /**
+   * Whether this run may merge its own PR. The terminal's approval mode decides: the
+   * mode of whoever started the run with /trigger, else of the Adamant user signed in
+   * with the GitHub account that owns the repository. With neither (an organization's
+   * repository, or an owner who never signed in) it merges, as the product does.
+   */
+  autoMerge: (runId: string) => Promise<boolean>
 }
 
 // Enough to say what broke; the worker log has the stack.
@@ -98,13 +109,50 @@ export function createRunStore(db: Db): RunStore {
         })
       })
     },
+
+    async autoMerge(runId) {
+      const owners = await db
+        .select({
+          createdBy: runs.createdByUserId,
+          accountGithubId: githubInstallations.accountGithubId,
+        })
+        .from(runs)
+        .innerJoin(repositories, eq(repositories.id, runs.repositoryId))
+        .innerJoin(githubInstallations, eq(githubInstallations.id, repositories.installationId))
+        .where(eq(runs.id, runId))
+        .limit(1)
+      const owner = owners[0]
+      if (!owner) return true
+
+      if (owner.createdBy) {
+        const rows = await db
+          .select({ autoMerge: users.autoMerge })
+          .from(users)
+          .where(eq(users.id, owner.createdBy))
+          .limit(1)
+        return rows[0]?.autoMerge ?? true
+      }
+      if (owner.accountGithubId === null) return true
+      const rows = await db
+        .select({ autoMerge: users.autoMerge })
+        .from(userIdentities)
+        .innerJoin(users, eq(users.id, userIdentities.userId))
+        .where(
+          and(
+            eq(userIdentities.provider, 'github'),
+            eq(userIdentities.providerUserId, String(owner.accountGithubId)),
+          ),
+        )
+        .limit(1)
+      return rows[0]?.autoMerge ?? true
+    },
   }
 }
 
 async function setStatus(
   db: Pick<Db, 'update'>,
   runId: string,
-  status: 'running' | 'succeeded' | 'failed',
+  status: 'running' | FinishedStatus,
 ) {
   await db
     .update(runs)

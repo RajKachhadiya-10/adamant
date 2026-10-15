@@ -11,6 +11,7 @@ import {
   createGithubInstallUnavailableRoute,
 } from './routes/githubInstall.ts'
 import { createRunsRoute } from './routes/runs.ts'
+import { createSettingsRoute } from './routes/settings.ts'
 import {
   createActivityService,
   listenForActivity,
@@ -21,7 +22,9 @@ import {
   createPostgresRunApiStore,
   type RunApiStore,
 } from './services/runStore.ts'
+import { enqueueGithubSync, throttle } from './services/jobs.ts'
 import { findInstalledRepository, listInstalledRepositories } from './services/repositoryLookup.ts'
+import { createPostgresSettingsStore } from './services/settingsStore.ts'
 import { createWebhookService } from './services/webhookService.ts'
 import { createPostgresWebhookStore } from './services/webhookStore.ts'
 import { createGithubWebhookRoute } from './webhooks/github.ts'
@@ -68,6 +71,9 @@ const alreadyAuthenticated: MiddlewareHandler = async (_c, next) => {
   await next()
 }
 
+/** The CLI polls every 2 s while it waits on an install; GitHub need not be read as often. */
+const SYNC_REQUEST_INTERVAL_MS = 10_000
+
 export function createServerApp(runStore?: RunApiStore, options: ServerOptions = {}) {
   const app = new Hono()
   const database =
@@ -101,6 +107,8 @@ export function createServerApp(runStore?: RunApiStore, options: ServerOptions =
   // "not installed yet" and the CLI would poll an in-memory row forever.
   app.use('/github', authMiddleware)
   app.use('/github/*', authMiddleware)
+  app.use('/settings', authMiddleware)
+  app.use('/settings/*', authMiddleware)
   if (database) {
     app.route(
       '/github',
@@ -109,9 +117,14 @@ export function createServerApp(runStore?: RunApiStore, options: ServerOptions =
           findRepository: (owner, name) => findInstalledRepository(database, owner, name),
           listRepositories: () => listInstalledRepositories(database),
           readAppSlug: () => process.env.GITHUB_APP_SLUG,
+          requestSync: throttle(() => enqueueGithubSync(database), SYNC_REQUEST_INTERVAL_MS),
         },
         alreadyAuthenticated,
       ),
+    )
+    app.route(
+      '/settings',
+      createSettingsRoute(createPostgresSettingsStore(database), alreadyAuthenticated),
     )
     app.route(
       '/auth',
@@ -122,6 +135,10 @@ export function createServerApp(runStore?: RunApiStore, options: ServerOptions =
     app.get('/health', (c) => c.json({ status: 'ok' }))
   } else {
     app.route('/github', createGithubInstallUnavailableRoute(alreadyAuthenticated))
+    // Without Postgres no heal runs, so there is no merge to decide.
+    app.all('/settings', (c) =>
+      c.json({ error: 'Settings need the hosted API with Postgres.' }, 503),
+    )
     createApp(undefined, app, resolvedActivityService, ['runs'])
   }
 

@@ -12,10 +12,12 @@ import {
   drainExpiredOAuthStates,
   graphStep,
   readConcurrency,
+  readHealAgent,
   readWorkspaceRoot,
+  syncStep,
   type GraphStepDependencies,
 } from '../../server/worker/index.ts'
-import { type HealRun } from '../../server/worker/runs.ts'
+import { type FinishedStatus, type HealRun } from '../../server/worker/runs.ts'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
@@ -29,6 +31,9 @@ const git = {
   mergePr: async () => {},
   getFailureLogs: async () => 'Error: boom at src/app.ts:10',
   readFile: async () => null,
+  resetToBase: async () => {},
+  listFiles: async () => [],
+  search: async () => '',
 } as GitProvider
 
 const sandbox = {
@@ -73,7 +78,7 @@ describe('worker', () => {
     const { calls, client } = recordingClient()
     const checkpointer = new MemorySaver()
     const seen: string[] = []
-    let finished: 'succeeded' | 'failed' | undefined
+    let finished: FinishedStatus | undefined
 
     await graphStep(
       { runId: 'run-1' },
@@ -117,6 +122,69 @@ describe('worker', () => {
     assert.equal(calls.length, 0)
   })
 
+  it('ends a manual-mode run awaiting review, with its PR open and unmerged', async () => {
+    const { client } = recordingClient()
+    let finished: FinishedStatus | undefined
+    const merged: number[] = []
+    const asked: string[] = []
+    await graphStep(
+      { runId: 'run-1' },
+      { logger: { info: () => {} } },
+      deps({
+        markFinished: async (_runId, status) => {
+          finished = status
+        },
+        autoMerge: async (runId) => {
+          asked.push(runId)
+          return false
+        },
+        createTools: () => ({
+          git: {
+            ...git,
+            mergePr: async (prNumber) => {
+              merged.push(prNumber)
+            },
+          },
+          sandbox,
+          recorder: createMemoryRecorder(),
+        }),
+        llmOptions: { client, model: 'gpt-6' },
+      }),
+    )
+    assert.equal(finished, 'awaiting_hitl')
+    assert.deepEqual(asked, ['run-1'])
+    assert.deepEqual(merged, [])
+  })
+
+  it('runs the autonomous agents unless told to use the classic steps', () => {
+    assert.equal(readHealAgent({}), 'agents')
+    assert.equal(readHealAgent({ ADAMANT_HEAL_AGENT: 'agents' }), 'agents')
+    assert.equal(readHealAgent({ ADAMANT_HEAL_AGENT: 'classic' }), 'classic')
+    assert.equal(readHealAgent({ ADAMANT_HEAL_AGENT: 'nonsense' }), 'agents')
+  })
+
+  it('skips the GitHub sync quietly when the App is not configured', async () => {
+    const lines: string[] = []
+    await syncStep(
+      { logger: { info: (message) => lines.push(message) } },
+      {
+        github: null,
+        store: {
+          transaction: async () => {
+            throw new Error('should not be called')
+          },
+          upsertInstallation: async () => 'i',
+          upsertRepository: async () => 'r',
+          createQueuedRun: async () => null,
+          recordAudit: async () => {},
+          awaitingReview: async () => [],
+          finishReview: async () => false,
+        },
+      },
+    )
+    assert.deepEqual(lines, [])
+  })
+
   it('does not start a second graph when the run is no longer queued', async () => {
     const { calls, client } = recordingClient()
     await graphStep(
@@ -133,8 +201,8 @@ describe('worker', () => {
   it('reclaims a running run after a transient first-attempt failure', async () => {
     const { client } = recordingClient()
     const retryFlags: boolean[] = []
-    let runStatus: 'queued' | 'running' | 'succeeded' | 'failed' = 'queued'
-    let finished: 'succeeded' | 'failed' | undefined
+    let runStatus: 'queued' | 'running' | FinishedStatus = 'queued'
+    let finished: FinishedStatus | undefined
     let fetchAttempts = 0
     const retryingGit = {
       ...git,

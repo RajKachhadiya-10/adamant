@@ -5,15 +5,16 @@ that PR**. It targets TypeScript repositories on GitHub Actions.
 
 You use it in two places:
 
-| Where            | What it is                            | What you see                                                        |
-| ---------------- | ------------------------------------- | ------------------------------------------------------------------- |
-| **GitHub**       | A GitHub App (the plugin) on the repo | Always on. Failed checks start a heal. Merged PRs are recorded.     |
-| **Your machine** | A CLI                                 | Stays connected to the **hosted** API. `adamant watch` is the feed. |
+| Where            | What it is                            | What you see                                                      |
+| ---------------- | ------------------------------------- | ----------------------------------------------------------------- |
+| **GitHub**       | A GitHub App (the plugin) on the repo | Always on. Failed checks start a heal. Merged PRs are recorded.   |
+| **Your machine** | A CLI                                 | Follows the **hosted** API's heals live, and runs a coding agent. |
 
 The App does **not** run inside GitHub. You install it on the repo; the
 **hosted** API and worker stay up and GitHub **pushes events** to them.
-That is the continuous check — not a poll loop. The CLI does not run the
-agent. It only reads the hosted backend.
+That is the continuous check — not a poll loop. Heals run on the hosted
+worker, never on the laptop. The CLI follows them, and its own agent works
+on your checkout only when you ask it to.
 
 How to build it: [tasks.md](tasks.md). Wiring:
 [backend-architecture.md](backend-architecture.md).
@@ -37,10 +38,29 @@ Tokens: mint an installation token per GitHub call. Never store it.
 
 ## How the CLI works
 
-`@adamant/cli` is a thin client of the **hosted** API. Set
-`ADAMANT_API_URL` to that origin and a seeded session
-(`ADAMANT_SESSION`). No OpenAI key. No GitHub token. Healing stays on the
-server.
+The `adamant` terminal (`tui/`) talks to the **hosted** API. Set
+`ADAMANT_API_URL` to that origin and give it a session: `/login` keeps one
+in `~/.adamant/session`, or set a seeded one in `ADAMANT_SESSION`. No GitHub
+token. Healing stays on the server.
+
+Plain text is a prompt for the terminal's agent, as in Codex: it runs shell
+commands, reads and edits files in the working directory, and calls the
+hosted API (status, runs, repositories, start a heal). The model key is the
+user's own (`OPENAI_API_KEY` or `~/.adamant/openai_key`); it goes to the model
+API and nowhere else, and commands the agent runs do not inherit it.
+Approvals are `auto` (the default) or `manual`, which asks before each
+command, file write, or heal; shift-tab or `/auto` and `/manual` switch.
+The mode is saved on the server too: in auto a heal merges its PR, in
+manual it stops at an open PR for you to review and merge.
+
+After `/login` (or on `/repos`) the terminal lists the user's GitHub
+repositories through their own `gh` login, or only their public ones without
+`gh`, since an App's user token sees only repositories the App is already on.
+Enter opens GitHub's install page with the picks preselected and waits for
+each one to be bound, by the webhook or, if that never arrives, by the
+worker's GitHub sync within about a minute. From then on the terminal follows the feed by
+itself: each heal shows as queued, started, sandbox verdicts, PR opened, and
+merged.
 
 ```
 adamant status              # hosted API up?
@@ -52,8 +72,10 @@ adamant watch               # stay connected: live feed
 
 `install` asks the hosted API for the public GitHub App URL and polls until
 that exact repository is in Postgres. The CLI does not hold `GITHUB_APP_SLUG`,
-a private key, or an installation token. Confirmation is the webhook-written
-`repositories` row.
+a private key, or an installation token. Confirmation is the `repositories`
+row, written by the webhook or by the worker's sync, which reads the App's
+installations from GitHub (and finds red default branches the webhook
+missed).
 
 `watch` opens a long-lived SSE (or reconnecting poll) to
 `GET /activity` on the hosted API. Close the terminal and the backend

@@ -7,6 +7,7 @@ import { createGitHubGitProvider } from './git-provider.ts'
 import { createGitHubClient, readGitHubAppConfig, type GitHubClient } from './github.ts'
 import { GitWorkspace } from './git.ts'
 import { createDockerSandboxProvider } from './sandbox-provider.ts'
+import { createDetectingSandbox, type SandboxSettings } from './sandbox-profile.ts'
 import { type HealRun } from './runs.ts'
 import { type Db } from '../db/client.ts'
 
@@ -30,15 +31,13 @@ export function createUnavailableGitProvider(): GitProvider {
     mergePr: async () => unavailable('merge_pull_request'),
     getFailureLogs: async () => unavailable('get_failure_logs'),
     readFile: async () => unavailable('git_read_file'),
+    resetToBase: async () => unavailable('git_reset'),
+    listFiles: async () => unavailable('git_list_files'),
+    search: async () => unavailable('git_search'),
   }
 }
 
-export interface SandboxSettings {
-  readonly image: string
-  readonly installCommand: string
-  readonly testCommand: string
-  readonly workdir?: string
-}
+export { type SandboxSettings }
 
 export function readSandboxSettings(env = process.env): SandboxSettings {
   return {
@@ -102,15 +101,20 @@ export function createRunProviders(options: RunProviderOptions): RunProviders {
     token: () => github.installationToken(run.installationId),
   })
 
-  const settings = options.sandboxSettings ?? readSandboxSettings()
-  const sandbox = createDockerSandboxProvider({
-    runId: run.runId,
+  const sandbox = createDetectingSandbox(
     workspacePath,
-    image: settings.image,
-    installCommand: settings.installCommand,
-    testCommand: settings.testCommand,
-    ...(settings.workdir ? { workdir: settings.workdir } : {}),
-  })
+    options.sandboxSettings ?? readSandboxSettings(),
+    (settings) =>
+      createDockerSandboxProvider({
+        runId: run.runId,
+        workspacePath,
+        image: settings.image,
+        installCommand: settings.installCommand,
+        testCommand: settings.testCommand,
+        ...(settings.workdir ? { workdir: settings.workdir } : {}),
+        ...(settings.user ? { user: settings.user } : {}),
+      }),
+  )
 
   return {
     git: createGitHubGitProvider(

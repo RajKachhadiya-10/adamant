@@ -10,6 +10,13 @@ export const oauthStates = pgTable(
 
     provider: text('provider').notNull(),
 
+    /**
+     * The PKCE verifier sent with the code exchange; the authorize redirect carries
+     * only its S256 challenge. Null only on a state issued before PKCE, which the
+     * callback refuses.
+     */
+    codeVerifier: text('code_verifier'),
+
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),

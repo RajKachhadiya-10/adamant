@@ -196,16 +196,22 @@ Never store secrets in `jsonb`.
 | `github_user_id` | text        | unique, nullable during OAuth migration |
 | `username`       | text        | not null                                |
 | `email`          | text        | nullable, unique case-insensitively     |
+| `auto_merge`     | boolean     | not null, default true                  |
 | `created_at`     | timestamptz | not null, default now() **(exec)**      |
 | `updated_at`     | timestamptz | not null, default now() **(exec)**      |
+
+`auto_merge` is the terminal's approval mode (`PUT /settings`). Before a heal merges its PR the
+worker reads it for the run's creator, else for the user whose GitHub identity owns the
+repository's installation (`github_installations.account_github_id`); with neither it merges.
 
 ### `user_identities`
 
 Links one Adamant user to a GitHub or Google account without storing provider access or refresh
 tokens. The pair `(provider, provider_user_id)` is unique, so concurrent callbacks cannot attach
-one provider account twice. A provider email is used to link accounts only after that provider
-reports it as verified; email comparison is normalized to lowercase and backed by the
-case-insensitive `users_email_uidx` index.
+one provider account twice. A provider email links a sign-in to an existing user only when that
+provider reports it verified **and** a different provider's identity on that user also holds it;
+`users.email` alone is a sign-up snapshot and never vouches. Email comparison is normalized to
+lowercase and backed by the case-insensitive `users_email_uidx` index.
 
 | Column             | Type        | Constraints                                 |
 | ------------------ | ----------- | ------------------------------------------- |
@@ -225,15 +231,43 @@ expiry, so a state cannot be replayed by concurrent callbacks. The worker delete
 hourly through the indexed `cleanup_oauth_states` task in batches of 1,000, stopping after a
 partial batch or 50 batches.
 
-| Column       | Type        | Constraints                      |
-| ------------ | ----------- | -------------------------------- |
-| `id`         | uuid        | PK                               |
-| `state`      | text        | unique, not null                 |
-| `provider`   | text        | not null, check GitHub or Google |
-| `created_at` | timestamptz | not null, default now()          |
-| `expires_at` | timestamptz | not null                         |
+| Column          | Type        | Constraints                      |
+| --------------- | ----------- | -------------------------------- |
+| `id`            | uuid        | PK                               |
+| `state`         | text        | unique, not null                 |
+| `provider`      | text        | not null, check GitHub or Google |
+| `code_verifier` | text        | nullable; the PKCE verifier      |
+| `created_at`    | timestamptz | not null, default now()          |
+| `expires_at`    | timestamptz | not null                         |
 
-Index: `oauth_states_expires_at_idx` on `expires_at`.
+Index: `oauth_states_expires_at_idx` on `expires_at`. The PKCE (S256) verifier never leaves the
+server: the authorize URL carries only its challenge. A state row without one predates PKCE and is
+refused.
+
+### `cli_logins`
+
+A terminal's browser sign-in, from `POST /auth/github/cli/start` until its poll is answered. Only
+hashes of the login id, poll secret, bound OAuth state and confirmation cookie are stored; the
+`XXXX-XXXX` user code is plain text because on its own it grants nothing. The browser must confirm
+that code on a server-rendered page before the poll can return a session, which stops a link sent
+to someone else from signing the sender in. The session is minted once, by a conditional
+`UPDATE … WHERE status = 'confirmed' RETURNING`, and is never stored here. Expired rows go with
+`cleanup_oauth_states`.
+
+| Column             | Type        | Constraints                                       |
+| ------------------ | ----------- | ------------------------------------------------- |
+| `id`               | uuid        | PK                                                |
+| `login_id_hash`    | text        | unique, not null                                  |
+| `poll_secret_hash` | text        | not null                                          |
+| `user_code`        | text        | not null                                          |
+| `state_hash`       | text        | unique, nullable until the browser begins         |
+| `confirm_hash`     | text        | unique, nullable until GitHub names the user      |
+| `status`           | text        | not null, default `pending`, checked              |
+| `user_id`          | uuid        | FK → `users.id` on delete cascade; set once named |
+| `created_at`       | timestamptz | not null, default now()                           |
+| `expires_at`       | timestamptz | not null                                          |
+
+Index: `cli_logins_expires_at_idx` on `expires_at`.
 
 ### `sessions`
 
@@ -262,6 +296,7 @@ GitHub App installation. Tokens are minted per call and **must not** appear here
 | ------------------------ | ----------- | ---------------------------------- |
 | `id`                     | uuid        | PK                                 |
 | `github_installation_id` | bigint      | unique, not null                   |
+| `account_github_id`      | bigint      | nullable; the owner's GitHub id    |
 | `created_at`             | timestamptz | not null, default now() **(exec)** |
 
 ### `repo_bindings`

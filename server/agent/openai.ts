@@ -190,7 +190,12 @@ export type OpenAiHealGraphOptions = OpenAiLlmOptions & {
  * The client is created here from that key. The API must not build one.
  */
 export function compileOpenAiHealGraph(
-  deps: { git: GitProvider; sandbox: SandboxProvider; recorder: RunRecorder },
+  deps: {
+    git: GitProvider
+    sandbox: SandboxProvider
+    recorder: RunRecorder
+    autoMerge?: () => Promise<boolean>
+  },
   options?: OpenAiHealGraphOptions,
 ) {
   const checkpointer = options?.checkpointer
@@ -200,6 +205,7 @@ export function compileOpenAiHealGraph(
       sandbox: deps.sandbox,
       recorder: deps.recorder,
       llm: createOpenAiLlm(options),
+      ...(deps.autoMerge ? { autoMerge: deps.autoMerge } : {}),
     },
     checkpointer ? { checkpointer } : undefined,
   )

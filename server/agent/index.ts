@@ -27,5 +27,5 @@ export {
 export { describeFailure, findLocations, parseFailure, type FailureContext } from './triage.ts'
 export { describeSources, readSources } from './sources.ts'
 export { normalizePatch } from './patch.ts'
-export { buildCommitMessage, buildPrBody, buildPrTitle } from './pr.ts'
+export { buildCommitMessage, buildPrBody, buildPrTitle, MADE_WITH, summarizePatch } from './pr.ts'
 export { ALLOWED_GIT_TOOLS, SecureGitClient, ToolDeniedError } from './tools.ts'

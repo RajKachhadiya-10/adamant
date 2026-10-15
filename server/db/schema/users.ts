@@ -1,5 +1,14 @@
 import { sql } from 'drizzle-orm'
-import { check, index, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
+import {
+  boolean,
+  check,
+  index,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from 'drizzle-orm/pg-core'
 
 /**
  * Adamant user account.
@@ -17,6 +26,13 @@ export const users = pgTable(
     username: text('username').notNull(),
 
     email: text('email'),
+
+    /**
+     * The terminal's approval mode (auto/manual). A heal on a repository this user's
+     * GitHub account owns merges its PR only while this is true; otherwise the PR waits
+     * for review. True by default: the product merges.
+     */
+    autoMerge: boolean('auto_merge').notNull().default(true),
 
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 

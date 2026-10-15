@@ -202,6 +202,11 @@ export const createNodes = (deps: AgentDependencies) => {
         outcome: outcome.verdict === 'pass' ? 'success' : 'failed_validation',
         ...(outcome.verdict === 'pass' ? {} : { failureReason: `sandbox ${outcome.verdict}` }),
       })
+      // `adamant watch` shows each attempt's verdict; the rows above are not on the feed.
+      await deps.recorder.audit('run.sandboxed', {
+        attempt: state.attemptNumber,
+        verdict: outcome.verdict,
+      })
 
       return {
         sandboxResult: {
@@ -243,6 +248,13 @@ export const createNodes = (deps: AgentDependencies) => {
             plan: state.plan ?? '',
             commands: state.sandboxResult.commands,
             attemptNumber: state.attemptNumber,
+            repository: {
+              owner: state.repository.owner,
+              name: state.repository.name,
+              branch: state.repository.defaultBranch,
+            },
+            baseSha: state.baseSha,
+            ...(state.candidatePatch ? { patch: state.candidatePatch } : {}),
           }),
         )
 
@@ -252,6 +264,7 @@ export const createNodes = (deps: AgentDependencies) => {
           baseSha: state.baseSha,
           candidateHash: state.candidateHash,
         })
+        await deps.recorder.audit('run.pr_opened', { prNumber: pr.number, prUrl: pr.url })
 
         return { prNumber: pr.number, prUrl: pr.url, status: 'publishing' }
       } catch (error) {
@@ -264,6 +277,16 @@ export const createNodes = (deps: AgentDependencies) => {
     mergePrNode: async (state: AgentState): Promise<Partial<AgentState>> => {
       if (!state.prNumber) {
         throw new Error('PR number missing before merge phase')
+      }
+
+      // Manual mode: the PR is the deliverable and a person merges it. The worker's sync
+      // marks the run succeeded once they do, or aborted if they close it.
+      if (deps.autoMerge && !(await deps.autoMerge())) {
+        await deps.recorder.audit('run.awaiting_review', {
+          prNumber: state.prNumber,
+          prUrl: state.prUrl,
+        })
+        return { status: 'awaiting_hitl' }
       }
 
       try {

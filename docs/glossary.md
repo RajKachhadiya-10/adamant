@@ -23,7 +23,7 @@ word does not make sense.
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Control plane**  | Hosted API + worker. The GitHub App sends webhooks here; the CLI reads the same origin.                                                        |
 | **GitHub App**     | The plugin installed on the repo. Failed CI starts a heal; merged PRs are recorded. Code does not run on GitHub.                               |
-| **CLI**            | `@adamant/cli` — `status` / `runs` / `run` / `watch`. Stays connected to the **hosted** API. No keys.                                          |
+| **CLI**            | The `adamant` terminal in `tui/` — `status` / `runs` / `run` / `watch`. Stays connected to the **hosted** API. No keys.                        |
 | **Hosted backend** | The always-on API + worker + Postgres the GitHub App and the CLI both talk to.                                                                 |
 | **Graph**          | The LangGraph state machine a worker runs to heal one build. Its nodes are listed in [backend-architecture.md](backend-architecture.md#graph). |
 | **Node**           | One step of the graph (`diagnose`, `patch`, …).                                                                                                |
