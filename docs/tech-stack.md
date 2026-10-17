@@ -25,7 +25,7 @@ checkpoints). If it gets in the way, drive the same loop from `runs.status`.
 | HTTP API              | [Hono](https://hono.dev) on `@hono/node-server`                     | Webhooks + CLI (`GET /runs`, `/activity`); raw body for HMAC                                   |
 | CLI                   | Rust: ratatui + crossterm, in `tui/`                                | Full-screen agent and heal feed; HTTPS to hosted API; user's own model key, no GitHub token    |
 | Validation / contract | `zod`, via `@hono/zod-validator`                                    | One schema package shared by API, workers and app                                              |
-| GitHub App + webhooks | `@octokit/app`, `@octokit/webhooks`                                 | Installation tokens minted per call; webhook signature checks                                  |
+| GitHub App + webhooks | `@octokit/app`, `@octokit/webhooks`                                 | Installation tokens minted on demand, held in worker memory only; webhook signature checks     |
 | Database              | PostgreSQL with Drizzle ORM                                         | Migrations checked in                                                                          |
 | Job queue             | `graphile-worker`                                                   | Postgres `SKIP LOCKED` plus `LISTEN/NOTIFY` for instant pickup                                 |
 | Agent graph           | `@langchain/langgraph` + `@langchain/langgraph-checkpoint-postgres` | `thread_id = run_id`; the graph does not `interrupt()` for a human                             |

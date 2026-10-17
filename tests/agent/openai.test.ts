@@ -268,4 +268,111 @@ describe('OpenAI heal model', () => {
     assert.equal(diagnoseInput.includes('noise line 0'), false)
     assert.equal(diagnoseInput.includes('##[group]'), false)
   })
+
+  it('routes every step and attempt of a run to one prompt cache, without the run id', async () => {
+    const { calls, client } = recordingClient()
+    const failingSandbox = {
+      runValidation: async () => ({ verdict: 'fail' as const, commands: [], output: 'no' }),
+    } as SandboxProvider
+    const graph = compileOpenAiHealGraph(
+      { git, sandbox: failingSandbox, recorder: createMemoryRecorder() },
+      { client, model: 'gpt-6' },
+    )
+
+    await graph.invoke({ runId: 'run-cache-key', repository, baseSha: 'abc', maxAttempts: 2 })
+
+    const keys = calls.map((call) => call.prompt_cache_key)
+    assert.equal(calls.length, 6)
+    assert.equal(new Set(keys).size, 1, 'the key is the same for both attempts')
+    assert.match(String(keys[0]), /^[0-9a-f]{32}$/)
+    assert.equal(String(keys[0]).includes('run-cache-key'), false)
+  })
+
+  it('gives different runs different cache keys', async () => {
+    const { calls, client } = recordingClient()
+    const otherGit = {
+      ...git,
+      getFailureLogs: async () => 'Error: other at src/b.ts:3',
+    } as GitProvider
+    const recorder = createMemoryRecorder()
+
+    await compileOpenAiHealGraph({ git, sandbox, recorder }, { client, model: 'gpt-6' }).invoke({
+      runId: 'run-a',
+      repository,
+      baseSha: 'abc',
+    })
+    await compileOpenAiHealGraph(
+      { git: otherGit, sandbox, recorder },
+      { client, model: 'gpt-6' },
+    ).invoke({ runId: 'run-b', repository, baseSha: 'abc' })
+
+    assert.notEqual(calls[0]?.prompt_cache_key, calls[3]?.prompt_cache_key)
+  })
+
+  it('puts each model call on the feed with its timing and cache hits', async () => {
+    const recorder = createMemoryRecorder()
+    let n = 0
+    const client: OpenAiResponses = {
+      create: async () => {
+        n += 1
+        return {
+          output_text: `step-${n}`,
+          usage: {
+            input_tokens: 1200,
+            output_tokens: 80,
+            input_tokens_details: { cached_tokens: n === 1 ? 0 : 1024 },
+            output_tokens_details: { reasoning_tokens: 30 },
+          },
+        }
+      },
+    }
+    const graph = compileOpenAiHealGraph({ git, sandbox, recorder }, { client, model: 'gpt-6' })
+
+    await graph.invoke({ runId: 'run-usage', repository, baseSha: 'abc' })
+
+    const modelCalls = recorder.audits.filter((row) => row.eventType === 'model.call')
+    assert.deepEqual(
+      modelCalls.map((row) => [row.payload.step, row.payload.effort, row.payload.status]),
+      [
+        ['diagnose', 'low', 'completed'],
+        ['plan', 'low', 'completed'],
+        ['patch', 'high', 'completed'],
+      ],
+    )
+    assert.deepEqual(
+      modelCalls.map((row) => row.payload.usage),
+      [
+        { input: 1200, cached: 0, output: 80, reasoning: 30 },
+        { input: 1200, cached: 1024, output: 80, reasoning: 30 },
+        { input: 1200, cached: 1024, output: 80, reasoning: 30 },
+      ],
+      'the counts survive the redaction of the audit payload',
+    )
+    for (const row of modelCalls) {
+      assert.equal(typeof row.payload.durationMs, 'number')
+    }
+  })
+
+  it('records a cut-off call before rejecting it', async () => {
+    const seen: string[] = []
+    const client: OpenAiResponses = {
+      create: async () => ({
+        output_text: '--- a',
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_output_tokens' },
+      }),
+    }
+
+    await assert.rejects(
+      createOpenAiLlm({ client, onCall: (call) => void seen.push(call.status) }).patch({
+        failure: { firstError: null, location: null, failingTests: [], excerpt: '' },
+        sources: [],
+        diagnostics: 'd',
+        plan: 'p',
+        previousAttempt: null,
+      }),
+      LlmTruncatedError,
+    )
+    assert.deepEqual(seen, ['incomplete'])
+  })
 })

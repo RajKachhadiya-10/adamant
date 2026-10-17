@@ -3,7 +3,11 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { describe, it } from 'node:test'
-import { createDockerSandboxProvider } from '../../server/worker/sandbox-provider.ts'
+import {
+  createDockerSandboxProvider,
+  evictStaleCaches,
+  warmSandboxImage,
+} from '../../server/worker/sandbox-provider.ts'
 import type { SandboxExecutionOptions, SandboxResult } from '../../server/sandbox/types.ts'
 
 const ok: SandboxResult = {
@@ -30,7 +34,7 @@ function fakeDocker(results: readonly SandboxResult[]) {
 
 const provider = (
   results: readonly SandboxResult[],
-  overrides: { installCommand?: string; workdir?: string } = {},
+  overrides: { installCommand?: string; workdir?: string; cacheDir?: string } = {},
 ) => {
   const { seen, sandbox } = fakeDocker(results)
   return {
@@ -163,6 +167,56 @@ describe('sandbox provider', () => {
     ])
   })
 
+  it('reports how long the install and the tests took together', async () => {
+    const { provider: sandbox } = provider([
+      { ...ok, durationMs: 40_000 },
+      { ...ok, durationMs: 15_000 },
+    ])
+
+    const outcome = await sandbox.runValidation({ attemptNumber: 1, candidateHash: 'hash' })
+
+    assert.equal(outcome.durationMs, 55_000)
+  })
+
+  it('reports the install time alone when the install fails', async () => {
+    const { provider: sandbox } = provider([
+      { ...ok, success: false, exitCode: 1, durationMs: 7_000 },
+    ])
+
+    const outcome = await sandbox.runValidation({ attemptNumber: 1, candidateHash: 'hash' })
+
+    assert.equal(outcome.durationMs, 7_000)
+  })
+
+  it('mounts the repository cache into the install container only', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'adamant-cache-test-'))
+    const dir = path.join(root, 'repo-1')
+    try {
+      const { seen, provider: sandbox } = provider([ok, ok], { cacheDir: dir })
+
+      await sandbox.runValidation({ attemptNumber: 1, candidateHash: 'hash' })
+
+      assert.equal(seen[0]?.cacheDir, dir)
+      assert.equal(seen[0]?.env?.npm_config_cache, '/adamant-cache/npm')
+      assert.equal(seen[0]?.env?.PIP_CACHE_DIR, '/adamant-cache/pip')
+      assert.equal(seen[1]?.cacheDir, undefined, 'the test container gets no cache')
+      assert.equal(seen[1]?.env, undefined)
+      assert.ok((await fs.stat(dir)).isDirectory(), 'created before the first install')
+      assert.ok((await fs.stat(path.join(dir, '.last-used'))).isFile(), 'stamped for eviction')
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('tells pip not to cache when the repository has no cache directory', async () => {
+    const { seen, provider: sandbox } = provider([ok, ok])
+
+    await sandbox.runValidation({ attemptNumber: 1, candidateHash: 'hash' })
+
+    assert.deepEqual(seen[0]?.env, { PIP_NO_CACHE_DIR: '1' })
+    assert.equal(seen[0]?.cacheDir, undefined)
+  })
+
   it('passes workdir option through to docker sandbox run calls', async () => {
     const { seen, provider: sandbox } = provider([ok, ok], { workdir: 'packages/backend' })
 
@@ -170,6 +224,167 @@ describe('sandbox provider', () => {
 
     assert.equal(seen[0]?.workdir, 'packages/backend')
     assert.equal(seen[1]?.workdir, 'packages/backend')
+  })
+})
+
+describe('sandbox image warm-up', () => {
+  const quiet = { log: () => {}, error: () => {} }
+
+  it('pulls the configured image and says so', async () => {
+    const pulled: string[] = []
+    const docker = {
+      pullImage: async (image: string) => {
+        pulled.push(image)
+        return true
+      },
+    }
+
+    assert.equal(await warmSandboxImage('ghcr.io/acme/ci:1', docker, quiet), true)
+    assert.deepEqual(pulled, ['ghcr.io/acme/ci:1'])
+  })
+
+  it('reports a pull that failed instead of throwing at boot', async () => {
+    const errors: string[] = []
+    const docker = { pullImage: async () => false }
+
+    const warmed = await warmSandboxImage('node:22-bookworm-slim', docker, {
+      log: () => {},
+      error: (message: string) => void errors.push(message),
+    })
+
+    assert.equal(warmed, false)
+    assert.match(errors[0] ?? '', /could not pull node:22-bookworm-slim/)
+  })
+})
+
+describe('sandbox focused tests', () => {
+  async function checkout(testScript: string) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'adamant-focus-test-'))
+    await fs.writeFile(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ scripts: { test: testScript } }),
+    )
+    await fs.mkdir(path.join(dir, 'src'))
+    await fs.writeFile(path.join(dir, 'src', 'sum.test.ts'), '')
+    return dir
+  }
+  const focus = ['src/sum.test.ts > sum > adds two numbers']
+  const focused = "npm test -- 'src/sum.test.ts' -t 'adds two numbers'"
+
+  it('runs the failing tests first and the whole suite only once they pass', async () => {
+    const dir = await checkout('vitest run')
+    try {
+      const { seen, sandbox } = fakeDocker([ok, ok, { ...ok, durationMs: 5 }])
+      const provider = createDockerSandboxProvider({
+        runId: 'run-1',
+        workspacePath: dir,
+        installCommand: 'npm ci',
+        testCommand: 'npm test',
+        sandbox,
+      })
+
+      const outcome = await provider.runValidation({ attemptNumber: 2, candidateHash: 'b', focus })
+
+      assert.deepEqual(
+        seen.map((call) => [call.command, call.network]),
+        [
+          ['npm ci', 'bridge'],
+          [focused, 'none'],
+          ['npm test', 'none'],
+        ],
+      )
+      assert.equal(outcome.verdict, 'pass')
+      assert.deepEqual(outcome.commands, ['npm ci', 'npm test'], 'the suite is what was verified')
+      assert.equal(outcome.durationMs, 25, 'install, focused and full runs together')
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('stops at the failing tests while they still fail', async () => {
+    const dir = await checkout('vitest run')
+    try {
+      const { seen, sandbox } = fakeDocker([
+        ok,
+        { ...ok, success: false, exitCode: 1, stdout: 'FAIL adds two numbers: expected 4' },
+      ])
+      const provider = createDockerSandboxProvider({
+        runId: 'run-1',
+        workspacePath: dir,
+        installCommand: 'npm ci',
+        testCommand: 'npm test',
+        sandbox,
+      })
+
+      const outcome = await provider.runValidation({ attemptNumber: 2, candidateHash: 'b', focus })
+
+      assert.deepEqual(
+        seen.map((call) => call.command),
+        ['npm ci', focused],
+      )
+      assert.equal(outcome.verdict, 'fail')
+      assert.deepEqual(outcome.commands, ['npm ci', focused], 'says which run failed')
+      assert.match(outcome.output, /expected 4/)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('runs the whole suite as before when the runner is unknown or nothing is focused', async () => {
+    const dir = await checkout('./scripts/test.sh')
+    try {
+      const { seen, sandbox } = fakeDocker([ok, ok, ok, ok])
+      const provider = createDockerSandboxProvider({
+        runId: 'run-1',
+        workspacePath: dir,
+        installCommand: 'npm ci',
+        testCommand: 'npm test',
+        sandbox,
+      })
+
+      await provider.runValidation({ attemptNumber: 2, candidateHash: 'b', focus })
+      await provider.runValidation({ attemptNumber: 3, candidateHash: 'c' })
+
+      // The fake install leaves nothing behind, so the second candidate installs again.
+      assert.deepEqual(
+        seen.map((call) => call.command),
+        ['npm ci', 'npm test', 'npm ci', 'npm test'],
+      )
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('sandbox cache eviction', () => {
+  it('removes caches no install has touched within the age and keeps the rest', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'adamant-evict-test-'))
+    try {
+      const day = 24 * 60 * 60_000
+      const now = Date.now()
+      for (const [name, age] of [
+        ['idle', 20 * day],
+        ['fresh', 1 * day],
+      ] as const) {
+        await fs.mkdir(path.join(root, name))
+        const marker = path.join(root, name, '.last-used')
+        await fs.writeFile(marker, '')
+        await fs.utimes(marker, (now - age) / 1000, (now - age) / 1000)
+      }
+      await fs.mkdir(path.join(root, 'unstamped'))
+      await fs.writeFile(path.join(root, 'a-file'), '')
+
+      const removed = await evictStaleCaches(root, 14 * day, now)
+
+      assert.deepEqual(removed, ['idle'])
+      assert.deepEqual((await fs.readdir(root)).sort(), ['a-file', 'fresh', 'unstamped'])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('is a no-op for a cache root that does not exist yet', async () => {
+    assert.deepEqual(await evictStaleCaches(path.join(os.tmpdir(), 'adamant-missing-cache'), 1), [])
   })
 })
 

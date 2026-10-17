@@ -7,8 +7,8 @@ import {
   Runner,
   tool,
   type FunctionTool,
+  type Usage,
 } from '@openai/agents'
-import OpenAI from 'openai'
 import { z } from 'zod'
 import {
   type GitProvider,
@@ -19,7 +19,7 @@ import {
   type SourceExcerpt,
 } from './deps.ts'
 import { compileHealGraph } from './graph.ts'
-import { createOpenAiLlm } from './openai.ts'
+import { createOpenAiLlm, openAiClient, promptCacheKey } from './openai.ts'
 import { normalizePatch } from './patch.ts'
 import { redactText, type RunRecorder } from './recorder.ts'
 import { describeSources } from './sources.ts'
@@ -136,6 +136,24 @@ function brief(failure: FailureContext, sources: readonly SourceExcerpt[]): stri
   return [describeFailure(failure), describeSources(sources)].filter(Boolean).join('\n\n')
 }
 
+/**
+ * What an agent run cost, summed over its model calls, for the run's feed.
+ * `cached` is the prompt-cache hit. The keys avoid the word "token" so the
+ * recorder's redaction keeps the counts.
+ */
+function agentUsage(responses: readonly { usage: Usage }[]) {
+  const sum = (details: readonly Record<string, number>[], key: string) =>
+    details.reduce((total, detail) => total + (detail[key] ?? 0), 0)
+  const usage = { input: 0, cached: 0, output: 0, reasoning: 0 }
+  for (const { usage: spent } of responses) {
+    usage.input += spent.inputTokens
+    usage.output += spent.outputTokens
+    usage.cached += sum(spent.inputTokensDetails, 'cached_tokens')
+    usage.reasoning += sum(spent.outputTokensDetails, 'reasoning_tokens')
+  }
+  return { requests: responses.length, usage }
+}
+
 /** list_files, read_file and search. Read-only; both agents get them. */
 export function readTools(bench: Workbench): FunctionTool<unknown, never, string>[] {
   const listFiles = tool({
@@ -216,6 +234,8 @@ export function tryPatchTool(
   sandbox: SandboxProvider,
   recorder: RunRecorder,
   tries: number,
+  /** The failing tests, run first on every try; the suite still decides a pass. */
+  focus: readonly string[] = [],
 ): FunctionTool<unknown, never, string> {
   let used = 0
   return tool({
@@ -242,6 +262,7 @@ export function tryPatchTool(
         const outcome = await sandbox.runValidation({
           attemptNumber: 0,
           candidateHash: createHash('sha256').update(diff).digest('hex'),
+          ...(focus.length > 0 ? { focus } : {}),
         })
         await recorder.toolInvocation({
           tool: 'sandbox_try_patch',
@@ -263,7 +284,8 @@ export function tryPatchTool(
 
 export function defaultRunner(apiKey: string): Runner {
   return new Runner({
-    modelProvider: new OpenAIProvider({ openAIClient: new OpenAI({ apiKey }) }),
+    // The process-wide client: its connections stay open across runs.
+    modelProvider: new OpenAIProvider({ openAIClient: openAiClient(apiKey) }),
     // Traces would carry the repository's code and logs to OpenAI's dashboard.
     tracingDisabled: true,
   })
@@ -290,26 +312,40 @@ export function createAutonomousLlm(
   // The investigator writes the plan with the diagnosis; plan() hands it back.
   const plans = new Map<string, string>()
 
-  const investigator = new Agent({
-    name: 'Adamant investigator',
-    instructions: INVESTIGATOR_INSTRUCTIONS,
-    model,
-    modelSettings: { reasoning: { effort: 'medium' } },
-    tools: readTools(bench),
-    outputType: Findings,
-  })
+  // Built per request: the cache key is a digest of the brief, which arrives
+  // with the request. Every turn of every agent of a run then shares one cache.
+  const investigator = (cacheKey: string) =>
+    new Agent({
+      name: 'Adamant investigator',
+      instructions: INVESTIGATOR_INSTRUCTIONS,
+      model,
+      modelSettings: {
+        reasoning: { effort: 'medium' },
+        providerData: { prompt_cache_key: cacheKey },
+      },
+      tools: readTools(bench),
+      outputType: Findings,
+    })
 
   return {
     async diagnose({ failure, sources, previousAttempt }) {
+      const summary = brief(failure, sources)
+      const startedAt = Date.now()
       try {
         const result = await runner.run(
-          investigator,
-          [brief(failure, sources), previous(previousAttempt)].filter(Boolean).join('\n\n'),
+          investigator(promptCacheKey(summary)),
+          [summary, previous(previousAttempt)].filter(Boolean).join('\n\n'),
           { maxTurns: INVESTIGATE_TURNS },
         )
         const findings = result.finalOutput
         if (!findings) throw new Error('The investigator returned nothing.')
         plans.set(findings.diagnosis, findings.plan)
+        await recorder.audit('agent.run', {
+          step: 'investigate',
+          model,
+          durationMs: Date.now() - startedAt,
+          ...agentUsage(result.rawResponses),
+        })
         await recorder.audit('run.investigated', {})
         return findings.diagnosis
       } catch (error) {
@@ -326,25 +362,39 @@ export function createAutonomousLlm(
     },
 
     async patch({ failure, sources, diagnostics, plan, previousAttempt }) {
+      const summary = brief(failure, sources)
       // Fresh per request: the try budget is per candidate, not per run.
       const fixer = new Agent({
         name: 'Adamant fixer',
         instructions: FIXER_INSTRUCTIONS,
         model,
-        modelSettings: { reasoning: { effort: 'high' } },
-        tools: [...readTools(bench), tryPatchTool(bench, sandbox, recorder, tries)],
+        modelSettings: {
+          reasoning: { effort: 'high' },
+          providerData: { prompt_cache_key: promptCacheKey(summary) },
+        },
+        tools: [
+          ...readTools(bench),
+          tryPatchTool(bench, sandbox, recorder, tries, failure.failingTests),
+        ],
         outputType: Fix,
       })
       const input = [
-        brief(failure, sources),
+        summary,
         `## Diagnosis\n${bounded(diagnostics, 8_000)}`,
         `## Plan\n${bounded(plan, 8_000)}`,
         previous(previousAttempt),
       ]
         .filter(Boolean)
         .join('\n\n')
+      const startedAt = Date.now()
       try {
         const result = await runner.run(fixer, input, { maxTurns: FIX_TURNS })
+        await recorder.audit('agent.run', {
+          step: 'fix',
+          model,
+          durationMs: Date.now() - startedAt,
+          ...agentUsage(result.rawResponses),
+        })
         const fix = result.finalOutput
         if (!fix?.patch.trim()) throw new LlmTruncatedError('the fixer returned no diff')
         return fix.patch

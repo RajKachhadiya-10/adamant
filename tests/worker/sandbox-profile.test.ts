@@ -54,7 +54,7 @@ describe('sandbox profile', () => {
     assert.deepStrictEqual(await detectSandboxSettings(dir, node, {}), {
       image: 'python:3.11-slim',
       installCommand:
-        'python -m venv --clear .adamant-venv && .adamant-venv/bin/pip install --quiet --disable-pip-version-check --no-cache-dir -e ".[dev]" pytest',
+        'python -m venv --clear .adamant-venv && .adamant-venv/bin/pip install --quiet --disable-pip-version-check -e ".[dev]" pytest',
       testCommand: '.adamant-venv/bin/python -m pytest -q',
       user: '1000:1000',
     })

@@ -157,6 +157,65 @@ describe('DockerSandbox', () => {
     )
   })
 
+  it('pulls an image quietly and reports whether the pull succeeded', async () => {
+    const calls: string[][] = []
+    const spawnExiting = (code: number): SpawnFunction => {
+      return (_cmd, args) => {
+        calls.push(args)
+        return closeSoon(createMockProcess(), code)
+      }
+    }
+
+    assert.strictEqual(
+      await new DockerSandbox({ spawnFn: spawnExiting(0) }).pullImage('node:22-bookworm-slim'),
+      true,
+    )
+    assert.strictEqual(
+      await new DockerSandbox({ spawnFn: spawnExiting(1) }).pullImage('node:22-bookworm-slim'),
+      false,
+    )
+    assert.deepEqual(calls, [
+      ['pull', '--quiet', 'node:22-bookworm-slim'],
+      ['pull', '--quiet', 'node:22-bookworm-slim'],
+    ])
+  })
+
+  it('mounts a package cache read-write at /adamant-cache when given one', async () => {
+    let capturedArgs: string[] = []
+    const mockSpawn: SpawnFunction = (_cmd, args) => {
+      capturedArgs = args
+      return closeSoon(createMockProcess())
+    }
+
+    const sandbox = new DockerSandbox({ spawnFn: mockSpawn })
+    await sandbox.run({
+      workspacePath: process.cwd(),
+      command: 'npm ci',
+      cacheDir: '/var/adamant/cache/repo-1',
+    })
+
+    assert.ok(capturedArgs.includes('type=bind,src=/var/adamant/cache/repo-1,dst=/adamant-cache'))
+  })
+
+  it('rejects a relative cache directory before shelling out', async () => {
+    let spawned = false
+    const sandbox = new DockerSandbox({
+      spawnFn: () => {
+        spawned = true
+        return closeSoon(createMockProcess())
+      },
+    })
+
+    const result = await sandbox.run({
+      workspacePath: process.cwd(),
+      command: 'npm ci',
+      cacheDir: 'cache/repo-1',
+    })
+
+    assert.strictEqual(result.reason, 'INVALID_WORKSPACE')
+    assert.strictEqual(spawned, false)
+  })
+
   it('handles infra failure distinctly from test failure', async () => {
     const mockSpawn: SpawnFunction = () => {
       const proc = createMockProcess()

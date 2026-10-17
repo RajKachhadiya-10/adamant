@@ -30,6 +30,11 @@ export interface SandboxExecutionOptions {
   user?: string
   /** Safe environment variables (filtered for secrets) */
   env?: Record<string, string>
+  /**
+   * Absolute host directory mounted read-write at `/adamant-cache` for package
+   * manager caches. Install containers only; a test container never gets one.
+   */
+  cacheDir?: string
 }
 
 export interface SandboxResult {

@@ -31,6 +31,8 @@ export interface SandboxResultRecord {
   readonly commands: readonly string[]
   readonly verdict: SandboxVerdict
   readonly exitCode?: number
+  /** How long the containers ran; the row's `started_at` is counted back from it. */
+  readonly durationMs?: number
 }
 
 export interface PrPublicationRecord {

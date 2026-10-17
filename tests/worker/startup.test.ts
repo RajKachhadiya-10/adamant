@@ -13,6 +13,8 @@ import {
   graphStep,
   readConcurrency,
   readHealAgent,
+  readSandboxCacheMaxAgeMs,
+  readSandboxCacheRoot,
   readWorkspaceRoot,
   syncStep,
   type GraphStepDependencies,
@@ -416,6 +418,25 @@ describe('worker', () => {
       '/var/lib/adamant',
     )
     assert.match(readWorkspaceRoot({}), /adamant-workspaces$/)
+  })
+
+  it('keeps package caches under the workspace root unless told otherwise', () => {
+    assert.equal(readSandboxCacheRoot('/var/lib/adamant', {}), '/var/lib/adamant/.cache')
+    assert.equal(
+      readSandboxCacheRoot('/var/lib/adamant', { ADAMANT_SANDBOX_CACHE_ROOT: '/mnt/cache' }),
+      '/mnt/cache',
+    )
+    assert.equal(
+      readSandboxCacheRoot('/var/lib/adamant', { ADAMANT_SANDBOX_CACHE_ROOT: 'none' }),
+      null,
+    )
+  })
+
+  it('evicts idle caches after two weeks unless told otherwise', () => {
+    const day = 24 * 60 * 60_000
+    assert.equal(readSandboxCacheMaxAgeMs({}), 14 * day)
+    assert.equal(readSandboxCacheMaxAgeMs({ ADAMANT_SANDBOX_CACHE_MAX_AGE_DAYS: '3' }), 3 * day)
+    assert.equal(readSandboxCacheMaxAgeMs({ ADAMANT_SANDBOX_CACHE_MAX_AGE_DAYS: 'soon' }), 14 * day)
   })
 
   it('refuses to start without DATABASE_URL', async () => {

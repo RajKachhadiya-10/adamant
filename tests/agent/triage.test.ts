@@ -23,6 +23,14 @@ describe('CI failure triage', () => {
     assert.match(String(failure.firstError), /AssertionError/)
   })
 
+  it('names pytest failures by their node id', () => {
+    const failure = parseFailure(
+      'FAILED tests/test_sum.py::test_add - AssertionError: assert 3 == 5\nFAILED to start the server',
+    )
+
+    assert.deepEqual(failure.failingTests, ['tests/test_sum.py::test_add'])
+  })
+
   it('strips timestamps, ANSI colour and Actions grouping from the excerpt', () => {
     const failure = parseFailure(`[31mError: red text[0m\n${actionsLog}`)
 

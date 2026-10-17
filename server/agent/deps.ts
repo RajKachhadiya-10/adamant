@@ -48,11 +48,20 @@ export interface SandboxOutcome {
   readonly commands: readonly string[]
   /** Bounded tail of the run, fed back into the next diagnose on a failure. */
   readonly output: string
+  /** Wall time of the install (when it ran) plus the tests, for `sandbox_results`. */
+  readonly durationMs?: number
 }
 
 export interface SandboxProvider {
-  /** The candidate is already applied to the workspace by `applyPatch`. */
-  runValidation(input: { attemptNumber: number; candidateHash: string }): Promise<SandboxOutcome>
+  /**
+   * The candidate is already applied to the workspace by `applyPatch`. `focus`
+   * names failing tests to run first; the full suite alone decides a pass.
+   */
+  runValidation(input: {
+    attemptNumber: number
+    candidateHash: string
+    focus?: readonly string[]
+  }): Promise<SandboxOutcome>
 }
 
 export interface PreviousAttempt {

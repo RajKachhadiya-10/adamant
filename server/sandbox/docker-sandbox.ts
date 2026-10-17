@@ -7,7 +7,11 @@ import type { SandboxExecutionOptions, SandboxResult, SpawnFunction } from './ty
 const MAX_BUFFER_BYTES = 512 * 1024 // 512KB bounded tail
 /** Set on every container so leftovers can be found by run, whoever started them. */
 const RUN_LABEL = 'adamant.run'
+/** Where a repository's package cache appears inside an install container. */
+export const CACHE_MOUNT = '/adamant-cache'
 const CLI_TIMEOUT_MS = 30_000
+/** A cold pull is tens of megabytes; a slow or private registry takes longer. */
+const PULL_TIMEOUT_MS = 10 * 60_000
 const FORBIDDEN_SECRET_KEYS = [
   'TOKEN',
   'SECRET',
@@ -51,36 +55,50 @@ export class DockerSandbox {
    */
   async removeRunContainers(runId: string): Promise<void> {
     const listed = await this.docker(['ps', '-aq', '--filter', `label=${RUN_LABEL}=${runId}`])
-    const ids = listed.split(/\s+/).filter((id) => id.length > 0)
+    const ids = listed.stdout.split(/\s+/).filter((id) => id.length > 0)
     if (ids.length === 0) return
     await this.docker(['rm', '-f', ...ids])
   }
 
-  /** stdout of a short docker CLI call, or '' when it fails or hangs. */
-  private docker(args: string[]): Promise<string> {
+  /**
+   * Pulls `image` ahead of the first run, so that run does not wait on the
+   * registry. Resolves to false, and never throws, when the daemon or the
+   * registry is unreachable: the next `docker run` pulls on its own.
+   */
+  async pullImage(image: string): Promise<boolean> {
+    const pulled = await this.docker(['pull', '--quiet', image], PULL_TIMEOUT_MS)
+    return pulled.ok
+  }
+
+  /** A short docker CLI call. `ok` is false, with empty output, when it fails or hangs. */
+  private docker(
+    args: string[],
+    timeoutMs = CLI_TIMEOUT_MS,
+  ): Promise<{ ok: boolean; stdout: string }> {
+    const failed = { ok: false, stdout: '' }
     return new Promise((resolve) => {
       let proc: ChildProcess
       try {
         proc = this.spawnFn('docker', args)
       } catch {
-        return resolve('')
+        return resolve(failed)
       }
       let stdout = ''
       const timer = setTimeout(() => {
         proc.kill('SIGKILL')
-        resolve('')
-      }, CLI_TIMEOUT_MS)
+        resolve(failed)
+      }, timeoutMs)
       proc.stdout?.setEncoding('utf8')
       proc.stdout?.on('data', (chunk: string) => {
         stdout += chunk
       })
       proc.on('error', () => {
         clearTimeout(timer)
-        resolve('')
+        resolve(failed)
       })
       proc.on('close', (code: number | null) => {
         clearTimeout(timer)
-        resolve(code === 0 ? stdout : '')
+        resolve(code === 0 ? { ok: true, stdout } : failed)
       })
     })
   }
@@ -132,6 +150,18 @@ export class DockerSandbox {
         exitCode: null,
         stdout: '',
         stderr: `Failed to inspect workspace path: ${errMsg}`,
+        timedOut: false,
+        durationMs: Date.now() - startTime,
+        reason: 'INVALID_WORKSPACE',
+      }
+    }
+
+    if (options.cacheDir !== undefined && !path.isAbsolute(options.cacheDir)) {
+      return {
+        success: false,
+        exitCode: null,
+        stdout: '',
+        stderr: `Invalid cacheDir: "${options.cacheDir}". Path must be absolute to prevent named-volume creation.`,
         timedOut: false,
         durationMs: Date.now() - startTime,
         reason: 'INVALID_WORKSPACE',
@@ -199,6 +229,16 @@ export class DockerSandbox {
       dockerArgs.push(
         '--mount',
         `type=bind,src=${path.join(resolvedPath, '.git')},dst=/workspace/.git,readonly`,
+      )
+    }
+
+    // The package cache for this repository, so a warm install reads tarballs
+    // from disk instead of the registry. The provider builds the path from the
+    // repository id; nothing from another repository is ever mounted here.
+    if (options.cacheDir !== undefined) {
+      dockerArgs.push(
+        '--mount',
+        `type=bind,src=${path.resolve(options.cacheDir)},dst=${CACHE_MOUNT}`,
       )
     }
 

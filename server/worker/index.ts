@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url'
 import { type BaseCheckpointSaver } from '@langchain/langgraph-checkpoint'
 import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres'
 import { run } from 'graphile-worker'
+import { evictStaleCaches, warmSandboxImage } from './sandbox-provider.ts'
 import { compileOpenAiHealGraph, type OpenAiLlmOptions } from '../agent/index.ts'
 import { compileAutonomousHealGraph } from '../agent/autonomous.ts'
 import { createPostgresWebhookStore } from '../api/services/webhookStore.ts'
@@ -88,6 +89,25 @@ export function readConcurrency(env = process.env): number {
  */
 export function readWorkspaceRoot(env = process.env): string {
   return env.ADAMANT_WORKSPACE_ROOT ?? path.join(os.tmpdir(), 'adamant-workspaces')
+}
+
+/**
+ * Where package caches live, one directory per repository. Under the
+ * workspace root by default, which the sandbox host already mounts. `none`
+ * turns them off and every install is cold.
+ */
+export function readSandboxCacheRoot(workspaceRoot: string, env = process.env): string | null {
+  const value = env.ADAMANT_SANDBOX_CACHE_ROOT
+  if (value === 'none') return null
+  return value || path.join(workspaceRoot, '.cache')
+}
+
+const DEFAULT_CACHE_MAX_AGE_DAYS = 14
+
+/** How long a repository's install cache may sit unused before boot removes it. */
+export function readSandboxCacheMaxAgeMs(env = process.env): number {
+  const days = Number(env.ADAMANT_SANDBOX_CACHE_MAX_AGE_DAYS ?? DEFAULT_CACHE_MAX_AGE_DAYS)
+  return (Number.isFinite(days) && days > 0 ? days : DEFAULT_CACHE_MAX_AGE_DAYS) * 24 * 60 * 60_000
 }
 
 export async function drainExpiredOAuthStates(deleteBatch: () => Promise<number>): Promise<number> {
@@ -240,8 +260,23 @@ async function main() {
     throw new Error('DATABASE_URL is required to start @adamant/worker')
   }
 
+  // Started first and not awaited: on a cold host the image pull is the
+  // longest step of boot and nothing below needs it. Without it the first
+  // heal spent its first minute on the registry, inside its install timeout.
+  void warmSandboxImage()
+
   const concurrency = readConcurrency()
   const workspaceRoot = readWorkspaceRoot()
+  const cacheRoot = readSandboxCacheRoot(workspaceRoot)
+  if (cacheRoot) {
+    // Not awaited: removing an idle cache can take a while and no heal needs it.
+    evictStaleCaches(cacheRoot, readSandboxCacheMaxAgeMs())
+      .then((removed) => {
+        if (removed.length > 0)
+          console.log(`@adamant/worker removed ${removed.length} idle cache(s)`)
+      })
+      .catch(() => {})
+  }
   // Fail at boot, not on the first heal, when the worktree root is unusable.
   await fs.mkdir(workspaceRoot, { recursive: true })
   await fs.access(workspaceRoot, fsConstants.W_OK)
@@ -275,7 +310,15 @@ async function main() {
 
   const deps: GraphStepDependencies = {
     ...store,
-    createTools: (healRun) => createRunProviders({ db, run: healRun, workspaceRoot }),
+    // The one client, so runs share its installation tokens with the sync.
+    createTools: (healRun) =>
+      createRunProviders({
+        db,
+        run: healRun,
+        workspaceRoot,
+        cacheRoot,
+        ...(github ? { github } : {}),
+      }),
     checkpointer,
     healAgent: readHealAgent(),
   }

@@ -79,9 +79,10 @@ describe('GitHub App client', () => {
     assert.equal(JSON.parse(Buffer.from(String(payload), 'base64url').toString()).iss, '12345')
   })
 
-  it('mints a token for each call and never reuses a stored one', async () => {
+  it('reuses an installation token from memory until shortly before it expires', async () => {
+    const expiresAt = new Date(Date.now() + 60 * 60_000).toISOString()
     const { calls, fetchImpl } = stubFetch({
-      '/access_tokens': { token: 'ghs_minted' },
+      '/access_tokens': { token: 'ghs_minted', expires_at: expiresAt },
       '/pulls': { number: 5, html_url: 'https://github.com/acme/eval/pull/5' },
     })
     const client = createGitHubClient(config, fetchImpl)
@@ -105,7 +106,45 @@ describe('GitHub App client', () => {
       body: 'body',
     })
 
-    assert.equal(calls.filter((call) => call.url.endsWith('/access_tokens')).length, 2)
+    assert.equal(calls.filter((call) => call.url.endsWith('/access_tokens')).length, 1)
+  })
+
+  it('mints again when the held token is about to expire or carried no expiry', async () => {
+    const soon = new Date(Date.now() + 2 * 60_000).toISOString()
+    const expiring = stubFetch({ '/access_tokens': { token: 'ghs_minted', expires_at: soon } })
+    const client = createGitHubClient(config, expiring.fetchImpl)
+    await client.installationToken('99')
+    await client.installationToken('99')
+    assert.equal(expiring.calls.length, 2)
+
+    const bare = stubFetch({ '/access_tokens': { token: 'ghs_minted' } })
+    const once = createGitHubClient(config, bare.fetchImpl)
+    await once.installationToken('99')
+    await once.installationToken('99')
+    assert.equal(bare.calls.length, 2)
+  })
+
+  it('shares one mint between concurrent first callers and forgets a failed one', async () => {
+    const expiresAt = new Date(Date.now() + 60 * 60_000).toISOString()
+    let status = 500
+    const calls: string[] = []
+    const fetchImpl: FetchLike = async (url) => {
+      calls.push(url)
+      return status === 500
+        ? new Response('boom', { status })
+        : Response.json({ token: 'ghs_minted', expires_at: expiresAt })
+    }
+    const client = createGitHubClient(config, fetchImpl)
+
+    await assert.rejects(client.installationToken('99'), /Could not mint/)
+    status = 200
+    const [a, b] = await Promise.all([
+      client.installationToken('99'),
+      client.installationToken('99'),
+    ])
+    assert.equal(a, 'ghs_minted')
+    assert.equal(b, 'ghs_minted')
+    assert.equal(calls.length, 2, 'one failed mint, then one shared mint')
   })
 
   it('downloads the failed jobs only', async () => {

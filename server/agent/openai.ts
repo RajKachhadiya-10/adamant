@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { type BaseCheckpointSaver } from '@langchain/langgraph-checkpoint'
 import OpenAI from 'openai'
 import { type ResponseCreateParamsNonStreaming } from 'openai/resources/responses/responses'
@@ -33,22 +34,54 @@ const HEAL_INSTRUCTIONS_PROMPT = [
   'When an earlier candidate is shown, it already failed: do not repeat it.',
 ].join('\n')
 
+/** Usage as the Responses API reports it. All optional: a test double returns none. */
+export type OpenAiUsage = {
+  input_tokens?: number
+  output_tokens?: number
+  input_tokens_details?: { cached_tokens?: number }
+  output_tokens_details?: { reasoning_tokens?: number }
+}
+
 export type OpenAiResponses = {
   create(body: ResponseCreateParamsNonStreaming): Promise<{
     output_text: string
     status?: string
     incomplete_details?: { reason?: string } | null
     error?: { message: string } | null
+    usage?: OpenAiUsage | null
   }>
+}
+
+export type HealStep = 'diagnose' | 'plan' | 'patch'
+
+type Effort = 'low' | 'high'
+
+/**
+ * One model call, for the run's feed. `usage.cached` is the prompt-cache hit
+ * docs/performance.md asks to watch. The keys avoid the word "token" so the
+ * recorder's redaction leaves the counts in place.
+ */
+export interface ModelCall {
+  readonly step: HealStep
+  readonly model: string
+  readonly effort: Effort
+  readonly status: string
+  readonly durationMs: number
+  readonly usage?: {
+    readonly input?: number
+    readonly cached?: number
+    readonly output?: number
+    readonly reasoning?: number
+  }
 }
 
 export type OpenAiLlmOptions = {
   client?: OpenAiResponses
   model?: string
   apiKey?: string
+  /** Called once per model call, as soon as it returns and before its reply is checked. */
+  onCall?: (call: ModelCall) => Promise<void> | void
 }
-
-type Effort = 'low' | 'high'
 
 function readModel(explicit: string | undefined): string {
   const fromEnv = process.env.OPENAI_MODEL
@@ -63,8 +96,25 @@ function requireApiKey(explicit: string | undefined): string {
   return key
 }
 
+/**
+ * One client per key for the life of the worker. The SDK client keeps its
+ * connections open, so a run's first call does not pay a new TLS handshake
+ * and the heals in flight share one pool instead of opening one each.
+ */
+const clients = new Map<string, OpenAI>()
+
+/** The SDK client for `apiKey`, shared by the classic steps and the Agents SDK runner. */
+export function openAiClient(apiKey: string): OpenAI {
+  let client = clients.get(apiKey)
+  if (!client) {
+    client = new OpenAI({ apiKey })
+    clients.set(apiKey, client)
+  }
+  return client
+}
+
 function responsesClient(apiKey: string): OpenAiResponses {
-  const openai = new OpenAI({ apiKey })
+  const openai = openAiClient(apiKey)
   return {
     create(body) {
       return openai.responses.create(body)
@@ -97,19 +147,63 @@ function sharedContext(failure: FailureContext, sources: readonly SourceExcerpt[
   return [describeFailure(failure), '', describeSources(sources)].join('\n')
 }
 
+/**
+ * Routes every call that opens with the same block to the same cache. A
+ * digest of that block is stable across the steps and attempts of a run,
+ * carries nothing from the run itself, and differs between runs whose
+ * prefixes differ anyway.
+ */
+export function promptCacheKey(shared: string): string {
+  return createHash('sha256').update(shared).digest('hex').slice(0, 32)
+}
+
+function usageOf(usage: OpenAiUsage | null | undefined): ModelCall['usage'] {
+  if (!usage) return undefined
+  const cached = usage.input_tokens_details?.cached_tokens
+  const reasoning = usage.output_tokens_details?.reasoning_tokens
+  return {
+    ...(usage.input_tokens === undefined ? {} : { input: usage.input_tokens }),
+    ...(cached === undefined ? {} : { cached }),
+    ...(usage.output_tokens === undefined ? {} : { output: usage.output_tokens }),
+    ...(reasoning === undefined ? {} : { reasoning }),
+  }
+}
+
+interface Prompt {
+  readonly step: HealStep
+  readonly effort: Effort
+  /** The block every step of the run opens with. */
+  readonly shared: string
+  /** This step's own lines, after the shared block; the task is the last one. */
+  readonly rest: readonly string[]
+}
+
 async function complete(
   client: OpenAiResponses,
   model: string,
-  effort: Effort,
-  input: string,
+  onCall: OpenAiLlmOptions['onCall'],
+  prompt: Prompt,
 ): Promise<string> {
+  const startedAt = Date.now()
   const response = await client.create({
     model,
     instructions: HEAL_INSTRUCTIONS_PROMPT,
-    input,
-    reasoning: { effort },
+    input: [prompt.shared, ...prompt.rest].join('\n'),
+    reasoning: { effort: prompt.effort },
+    prompt_cache_key: promptCacheKey(prompt.shared),
     // CI logs can contain secrets. Do not retain the prompt with OpenAI.
     store: false,
+  })
+  // Recorded before the reply is judged, so a cut-off or failed call is on
+  // the feed with its time and tokens like any other.
+  const usage = usageOf(response.usage)
+  await onCall?.({
+    step: prompt.step,
+    model,
+    effort: prompt.effort,
+    status: response.status ?? 'completed',
+    durationMs: Date.now() - startedAt,
+    ...(usage ? { usage } : {}),
   })
   if (response.error) {
     throw new Error(`OpenAI heal call failed: ${response.error.message}`)
@@ -129,43 +223,42 @@ async function complete(
 export function createOpenAiLlm(options?: OpenAiLlmOptions): LlmProvider {
   const model = readModel(options?.model)
   const client = options?.client ?? responsesClient(requireApiKey(options?.apiKey))
+  const onCall = options?.onCall
+  const call = (prompt: Prompt) => complete(client, model, onCall, prompt)
 
   return {
     diagnose({ failure, sources, previousAttempt }) {
-      return complete(
-        client,
-        model,
-        'low',
-        [
-          sharedContext(failure, sources),
+      return call({
+        step: 'diagnose',
+        effort: 'low',
+        shared: sharedContext(failure, sources),
+        rest: [
           describeAttempt(previousAttempt),
           '',
           'Task: sort this failure. Name the cause, the file and line when present, and the tests involved.',
-        ].join('\n'),
-      )
+        ],
+      })
     },
     plan({ failure, sources, diagnostics }) {
-      return complete(
-        client,
-        model,
-        'low',
-        [
-          sharedContext(failure, sources),
+      return call({
+        step: 'plan',
+        effort: 'low',
+        shared: sharedContext(failure, sources),
+        rest: [
           '',
           'Diagnosis:',
           tail(diagnostics),
           '',
           'Task: write a short repair plan from this diagnosis. Name the files to change and why.',
-        ].join('\n'),
-      )
+        ],
+      })
     },
     patch({ failure, sources, diagnostics, plan, previousAttempt }) {
-      return complete(
-        client,
-        model,
-        'high',
-        [
-          sharedContext(failure, sources),
+      return call({
+        step: 'patch',
+        effort: 'high',
+        shared: sharedContext(failure, sources),
+        rest: [
           '',
           'Diagnosis:',
           tail(diagnostics),
@@ -175,14 +268,19 @@ export function createOpenAiLlm(options?: OpenAiLlmOptions): LlmProvider {
           describeAttempt(previousAttempt),
           '',
           'Task: write the unified diff for this plan against the source shown. Return the diff only, with no explanation.',
-        ].join('\n'),
-      )
+        ],
+      })
     },
   }
 }
 
 export type OpenAiHealGraphOptions = OpenAiLlmOptions & {
   checkpointer?: BaseCheckpointSaver
+}
+
+/** Each call goes on the run's feed: which step, how long, and how much of the prompt was cached. */
+function auditModelCalls(recorder: RunRecorder): (call: ModelCall) => Promise<void> {
+  return (call) => recorder.audit('model.call', { ...call })
 }
 
 /**
@@ -204,7 +302,10 @@ export function compileOpenAiHealGraph(
       git: deps.git,
       sandbox: deps.sandbox,
       recorder: deps.recorder,
-      llm: createOpenAiLlm(options),
+      llm: createOpenAiLlm({
+        ...options,
+        onCall: options?.onCall ?? auditModelCalls(deps.recorder),
+      }),
       ...(deps.autoMerge ? { autoMerge: deps.autoMerge } : {}),
     },
     checkpointer ? { checkpointer } : undefined,

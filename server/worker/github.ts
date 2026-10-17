@@ -25,6 +25,8 @@ const USER_AGENT = 'adamant-heal-agent'
  */
 const API_TIMEOUT_MS = 30_000
 const LOG_TIMEOUT_MS = 120_000
+/** A token this close to its expiry is not reused: a long push could outlive it. */
+const TOKEN_REUSE_MARGIN_MS = 5 * 60_000
 /** Failed jobs in a matrix can run to dozens; this bounds sockets and memory. */
 const LOG_DOWNLOAD_CONCURRENCY = 4
 const PAGE_SIZE = 100
@@ -273,32 +275,60 @@ export function createGitHubClient(config: GitHubAppConfig, fetchImpl?: FetchLik
     return items
   }
 
+  /**
+   * Installation tokens live an hour. One per installation is held in this
+   * closure and reused until shortly before it expires, then minted again.
+   * Memory only: never on a run, in a checkpoint, a prompt, a log or the
+   * sandbox (docs/backend-architecture.md#identity). A failed mint is dropped
+   * so the next call tries again; concurrent first callers share one mint.
+   */
+  const tokens = new Map<string, Promise<{ token: string; expiresAt: number }>>()
+
+  async function mint(installationId: string): Promise<{ token: string; expiresAt: number }> {
+    const response = await doFetch(`${api}/app/installations/${installationId}/access_tokens`, {
+      method: 'POST',
+      headers: {
+        accept: 'application/vnd.github+json',
+        authorization: `Bearer ${appJwt(config)}`,
+        'user-agent': USER_AGENT,
+        'x-github-api-version': '2022-11-28',
+      },
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    })
+
+    if (!response.ok) {
+      throw new GitHubApiError(
+        response.status,
+        `Could not mint an installation token: ${response.status}`,
+      )
+    }
+
+    const body = (await response.json()) as { token?: string; expires_at?: string }
+    if (!body.token) {
+      throw new GitHubApiError(response.status, 'Installation token response had no token')
+    }
+    // Without an expiry nothing is assumed: the token is used once, as before.
+    const expiresAt = body.expires_at ? Date.parse(body.expires_at) : 0
+    return { token: body.token, expiresAt: Number.isNaN(expiresAt) ? 0 : expiresAt }
+  }
+
   const client: GitHubClient = {
     async installationToken(installationId) {
-      const response = await doFetch(`${api}/app/installations/${installationId}/access_tokens`, {
-        method: 'POST',
-        headers: {
-          accept: 'application/vnd.github+json',
-          authorization: `Bearer ${appJwt(config)}`,
-          'user-agent': USER_AGENT,
-          'x-github-api-version': '2022-11-28',
-        },
-        signal: AbortSignal.timeout(API_TIMEOUT_MS),
-      })
-
-      if (!response.ok) {
-        throw new GitHubApiError(
-          response.status,
-          `Could not mint an installation token: ${response.status}`,
-        )
+      // Looked up before any await, so two callers in the same tick see one mint.
+      const pending = tokens.get(installationId)
+      if (pending) {
+        const held = await pending.catch(() => null)
+        if (held && held.expiresAt - Date.now() > TOKEN_REUSE_MARGIN_MS) return held.token
       }
 
-      const body = (await response.json()) as { token?: string }
-      if (!body.token) {
-        throw new GitHubApiError(response.status, 'Installation token response had no token')
+      const minted = mint(installationId)
+      tokens.set(installationId, minted)
+      try {
+        return (await minted).token
+      } catch (error) {
+        tokens.delete(installationId)
+        throw error
       }
-
-      return body.token
     },
 
     /** Failed jobs only. Downloading the whole run is the slow, noisy path. */

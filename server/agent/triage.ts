@@ -58,6 +58,8 @@ const LOCATION_PATTERNS: readonly RegExp[] = [
 const TEST_PATTERNS: readonly RegExp[] = [
   /^\s*not ok \d+\s*-\s*(.+)$/,
   /^\s*FAIL\s+(.+)$/,
+  // pytest: `FAILED tests/test_sum.py::test_add - AssertionError`; the id alone.
+  /^\s*FAILED\s+(\S+::\S+)/,
   /^\s*\d+\)\s+(.+)$/,
 ]
 

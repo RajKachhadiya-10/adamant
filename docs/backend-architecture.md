@@ -108,8 +108,10 @@ Two principals. Do not mix their tokens.
 | User                    | Session from GitHub or Google OAuth | CLI + `POST /runs`                    |
 | GitHub App installation | HMAC + per-call installation token  | What the agent may do on a bound repo |
 
-Installation tokens are minted per call. They are never stored in the CLI,
-Electron, sessions, checkpoints, prompts, or the sandbox.
+Installation tokens are minted on demand and reused from the worker's memory
+until shortly before they expire (`createGitHubClient` holds one per
+installation). They are never stored in the CLI, Electron, sessions,
+checkpoints, prompts, logs, or the sandbox.
 
 The worker sees `{ runId }` only. It trusts a `runs` row the API already
 created.
@@ -521,6 +523,8 @@ Host clones, strips remotes and credentials, then starts the container.
 - network off during tests (registry allowlist only for install)
 - no `docker.sock`, dropped caps, memory / CPU / PID / time limits
 - one container per job, destroyed on exit
+- a package cache per repository, mounted at `/adamant-cache` during install
+  only; never another repository's
 - logs go to the artifact store; `verdict` is `pass` or `fail`
 
 ## Failure

@@ -44,7 +44,7 @@ word does not make sense.
 | **Tool gateway**       | The layer every tool call goes through. It checks the allowlist, scopes the call to the run's repo, redacts the arguments, and logs the call. |
 | **Fail closed**        | When a request is not explicitly allowed, deny it. An unknown tool is refused, not guessed at.                                                |
 | **Installation**       | A GitHub App installed on an account or org. It, not a user, is what grants Adamant access to a repo.                                         |
-| **Installation token** | A short-lived GitHub token minted from the installation. Created per call and thrown away.                                                    |
+| **Installation token** | A short-lived GitHub token minted from the installation. Held in worker memory until near expiry, then thrown away; stored nowhere.           |
 | **Delivery ID**        | GitHub's `X-GitHub-Delivery` header, unique per webhook delivery. Our deduplication key.                                                      |
 | **Idempotency key**    | What stops one event creating two runs: `workflow_run:{head_sha}`, or the client's `Idempotency-Key` header.                                  |
 | **Seeded user**        | The placeholder row in `users` that owns runs until a real account exists.                                                                    |

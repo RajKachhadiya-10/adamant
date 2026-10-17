@@ -379,4 +379,65 @@ describe('autonomous heal agents', () => {
   it('never sends traces to OpenAI', () => {
     assert.strictEqual(defaultRunner('sk-test').config.tracingDisabled, true)
   })
+
+  it('routes both agents of a run to one prompt cache and puts each run on the feed', async () => {
+    const recorder = createMemoryRecorder()
+    const { workbench } = bench()
+    const seen: ModelRequest[] = []
+    const llm = createAutonomousLlm(workbench, sandbox(['pass']), recorder, {
+      runner: scripted(
+        [{ final: { diagnosis: 'd', plan: 'p' } }, { final: { patch: GOOD, checked: 'passed' } }],
+        seen,
+      ),
+    })
+
+    const diagnosis = await llm.diagnose({ failure, sources: [], previousAttempt: null })
+    await llm.patch({
+      failure,
+      sources: [],
+      diagnostics: diagnosis,
+      plan: 'p',
+      previousAttempt: null,
+    })
+
+    const keys = seen.map((request) => request.modelSettings.providerData?.prompt_cache_key)
+    assert.strictEqual(seen.length, 2)
+    assert.match(String(keys[0]), /^[0-9a-f]{32}$/)
+    assert.strictEqual(keys[0], keys[1], "the fixer reuses the investigator's cache")
+
+    const runs = recorder.audits.filter((row) => row.eventType === 'agent.run')
+    assert.deepStrictEqual(
+      runs.map((row) => [row.payload.step, row.payload.requests]),
+      [
+        ['investigate', 1],
+        ['fix', 1],
+      ],
+    )
+    assert.deepStrictEqual(runs[0]?.payload.usage, { input: 0, cached: 0, output: 0, reasoning: 0 })
+    assert.strictEqual(typeof runs[0]?.payload.durationMs, 'number')
+  })
+
+  it('tries a patch against the failing tests first', async () => {
+    const { workbench } = bench()
+    const inputs: { focus?: readonly string[] }[] = []
+    const trying = {
+      async runValidation(input: { focus?: readonly string[] }): Promise<SandboxOutcome> {
+        inputs.push(input)
+        return { verdict: 'pass', commands: ['npm test'], output: 'ok' }
+      },
+    }
+    const llm = createAutonomousLlm(workbench, trying, createMemoryRecorder(), {
+      runner: scripted([
+        [{ call: 'try_patch', args: { patch: GOOD } }],
+        { final: { patch: GOOD, checked: 'passed' } },
+      ]),
+    })
+
+    await llm.patch({ failure, sources: [], diagnostics: 'd', plan: 'p', previousAttempt: null })
+
+    assert.deepStrictEqual(
+      inputs.map((input) => input.focus),
+      [['sum adds']],
+    )
+  })
 })

@@ -63,6 +63,9 @@ export function createPostgresRecorder(db: Db, context: RecorderContext): RunRec
     },
 
     async sandboxResult(record) {
+      // Written after the containers exit, so the start is counted back from
+      // now. Two equal timestamps said nothing about where a heal's time went.
+      const finishedAt = new Date()
       await db
         .insert(sandboxResults)
         .values({
@@ -73,8 +76,8 @@ export function createPostgresRecorder(db: Db, context: RecorderContext): RunRec
           commands: [...record.commands],
           verdict: record.verdict,
           exitCode: record.exitCode ?? null,
-          startedAt: new Date(),
-          finishedAt: new Date(),
+          startedAt: new Date(finishedAt.getTime() - (record.durationMs ?? 0)),
+          finishedAt,
         })
         .onConflictDoNothing()
     },

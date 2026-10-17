@@ -54,10 +54,11 @@ export async function detectSandboxSettings(
     image: `python:${await pythonVersion(workspacePath)}-slim`,
     // Install and tests run in separate containers, and only the worktree is shared,
     // so the environment lives in it. The commit holds only the staged candidate.
-    installCommand: `python -m venv --clear ${VENV} && ${VENV}/bin/pip install --quiet --disable-pip-version-check --no-cache-dir ${packages.join(' ')}`,
+    installCommand: `python -m venv --clear ${VENV} && ${VENV}/bin/pip install --quiet --disable-pip-version-check ${packages.join(' ')}`,
     testCommand: `${VENV}/bin/python -m pytest -q`,
-    // The python images have no `node` user. 1000 is the uid that user has, and with
-    // no home directory pip is told not to cache.
+    // The python images have no `node` user. 1000 is the uid that user has. It has
+    // no home directory, so the sandbox points pip at the repository's cache mount
+    // or, without one, tells it not to cache (PIP_NO_CACHE_DIR).
     user: PYTHON_USER,
     ...(configured.workdir ? { workdir: configured.workdir } : {}),
   }

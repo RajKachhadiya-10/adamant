@@ -357,22 +357,77 @@ describe('autonomous heal loop', () => {
 
     await graph.invoke({ runId: 'run-82', repository, baseSha: 'abc' })
 
-    assert.deepEqual(
-      recorder.tools.map((row) => row.tool),
-      [
-        'git_fetch',
-        'git_checkout',
-        'get_failure_logs',
-        'git_read_file',
-        'git_apply_patch',
-        'git_commit',
-        'git_push',
-        'open_pull_request',
-        'merge_pull_request',
-      ],
-    )
+    const tools = recorder.tools.map((row) => row.tool)
+    // The checkout and the log download overlap, so only their set is fixed.
+    assert.deepEqual(tools.slice(0, 3).sort(), ['get_failure_logs', 'git_checkout', 'git_fetch'])
+    assert.deepEqual(tools.slice(3), [
+      'git_read_file',
+      'git_apply_patch',
+      'git_commit',
+      'git_push',
+      'open_pull_request',
+      'merge_pull_request',
+    ])
     assert.ok(recorder.tools.every((row) => row.outcome === 'ok'))
     assert.ok(recorder.tools.every((row) => row.args.runId === 'run-82'))
+  })
+
+  it('runs the failing tests first on a retry, never on the first candidate', async () => {
+    const inputs: { attemptNumber: number; focus?: readonly string[] }[] = []
+    const sandbox = {
+      runValidation: async (input: { attemptNumber: number; focus?: readonly string[] }) => {
+        inputs.push(input)
+        return inputs.length === 1 ? fail : pass
+      },
+    }
+    const graph = compileHealGraph({
+      git: fakeGit(journal()),
+      sandbox,
+      llm: scriptedLlm(['first', 'second']),
+      recorder: createMemoryRecorder(),
+    })
+
+    const finalState = await graph.invoke({ runId: 'run-84', repository, baseSha: 'abc' })
+
+    assert.equal(finalState.status, 'completed')
+    assert.deepEqual(
+      inputs.map((input) => [input.attemptNumber, input.focus]),
+      [
+        [1, undefined],
+        [2, ['sum adds two numbers']],
+      ],
+    )
+  })
+
+  it('downloads the failure log while the checkout is still fetching', async () => {
+    const order: string[] = []
+    let releaseFetch = () => {}
+    const fetching = new Promise<void>((resolve) => {
+      releaseFetch = resolve
+    })
+    const graph = compileHealGraph({
+      git: fakeGit(journal(), {
+        fetch: async () => {
+          order.push('fetch:start')
+          await fetching
+          order.push('fetch:end')
+        },
+        getFailureLogs: async () => {
+          order.push('logs')
+          releaseFetch()
+          return failingLog
+        },
+      }),
+      sandbox: sandboxScript([pass]),
+      llm: scriptedLlm(['diff']),
+      recorder: createMemoryRecorder(),
+    })
+
+    const finalState = await graph.invoke({ runId: 'run-83', repository, baseSha: 'abc' })
+
+    assert.equal(finalState.status, 'completed')
+    // Had the log waited for the fetch, the fetch would never have been released.
+    assert.deepEqual(order, ['fetch:start', 'logs', 'fetch:end'])
   })
 
   it('keeps a token out of the tool log even if one reaches a tool argument', async () => {

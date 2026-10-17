@@ -28,8 +28,8 @@ Run state lives in `runs`. Queue state lives in graphile-worker's own schema. Do
 - A hand-rolled `jobs` table (`kind`, `locked_by`, `available_at`, …). graphile-worker already
   does `SKIP LOCKED` + `LISTEN/NOTIFY`.
 - Columns for GitHub installation tokens, OAuth access tokens, or raw `Authorization`
-  secrets. Mint installation tokens per call; store only `sessions.token_hash`, never the
-  bearer or a GitHub user token.
+  secrets. Installation tokens live only in worker memory; store only `sessions.token_hash`,
+  never the bearer or a GitHub user token.
 - Failure fingerprints, monthly budgets, `.adamant.yml`, or review-memory
   tables. Those are later.
 - Soft-delete. We do not delete runs.
@@ -290,7 +290,7 @@ Never log the raw secret. Never store GitHub user access tokens here.
 
 ### `installations`
 
-GitHub App installation. Tokens are minted per call and **must not** appear here.
+GitHub App installation. Tokens live only in worker memory and **must not** appear here.
 
 | Column                   | Type        | Constraints                        |
 | ------------------------ | ----------- | ---------------------------------- |

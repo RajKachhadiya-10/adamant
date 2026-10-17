@@ -60,6 +60,8 @@ export interface RunProviderOptions {
   readonly db: Db
   readonly run: HealRun
   readonly workspaceRoot?: string
+  /** Package caches, one directory per repository. Null turns them off. */
+  readonly cacheRoot?: string | null
   readonly github?: GitHubClient | null
   readonly sandboxSettings?: SandboxSettings
 }
@@ -88,10 +90,15 @@ export function createRunProviders(options: RunProviderOptions): RunProviders {
     }
   }
 
-  const workspacePath = path.join(
-    options.workspaceRoot ?? path.join(os.tmpdir(), 'adamant-workspaces'),
-    run.runId,
-  )
+  const workspaceRoot = options.workspaceRoot ?? path.join(os.tmpdir(), 'adamant-workspaces')
+  const workspacePath = path.join(workspaceRoot, run.runId)
+  // Keyed by repository, so a run reads only what earlier runs of the same
+  // repository wrote. Under the workspace root because the sandbox host already
+  // mounts that root (docker-compose.yml).
+  const cacheDir =
+    options.cacheRoot === null
+      ? undefined
+      : path.join(options.cacheRoot ?? path.join(workspaceRoot, '.cache'), run.repositoryId)
 
   const workspace = new GitWorkspace({
     runId: run.runId,
@@ -113,6 +120,7 @@ export function createRunProviders(options: RunProviderOptions): RunProviders {
         testCommand: settings.testCommand,
         ...(settings.workdir ? { workdir: settings.workdir } : {}),
         ...(settings.user ? { user: settings.user } : {}),
+        ...(cacheDir ? { cacheDir } : {}),
       }),
   )
 

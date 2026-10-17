@@ -34,11 +34,16 @@ export const createNodes = (deps: AgentDependencies) => {
   return {
     retrieveNode: async (state: AgentState): Promise<Partial<AgentState>> => {
       const git = gateway(state)
-      await git.fetch(state.repository)
-      await git.checkout(state.baseSha)
+      // The checkout and the log download wait on different hosts (the
+      // repository, then the Actions API), so they overlap. The sources need
+      // both: the parsed log names the files, the checkout holds them.
+      const [, logs] = await Promise.all([
+        git.fetch(state.repository).then(() => git.checkout(state.baseSha)),
+        git.getFailureLogs(),
+      ])
 
       // Parsed here, once. Retries reuse it instead of re-downloading the log.
-      const failure = parseFailure(await git.getFailureLogs())
+      const failure = parseFailure(logs)
       const sources = await readSources((path) => git.readFile(path), failure)
       await deps.recorder.audit('run.retrieved', {
         baseSha: state.baseSha,
@@ -183,6 +188,9 @@ export const createNodes = (deps: AgentDependencies) => {
       const outcome = await deps.sandbox.runValidation({
         attemptNumber: state.attemptNumber,
         candidateHash: state.candidateHash,
+        // The first candidate runs the whole suite. A retry runs the failing
+        // tests first; most retries die there, in seconds instead of minutes.
+        ...(state.attemptNumber > 1 && state.failure ? { focus: state.failure.failingTests } : {}),
       })
 
       // The merge gate reads this row back, so it is written before any push.
@@ -193,6 +201,7 @@ export const createNodes = (deps: AgentDependencies) => {
         commands: outcome.commands,
         verdict: outcome.verdict,
         ...(outcome.exitCode === undefined ? {} : { exitCode: outcome.exitCode }),
+        ...(outcome.durationMs === undefined ? {} : { durationMs: outcome.durationMs }),
       })
 
       await deps.recorder.patchAttempt({
@@ -206,6 +215,7 @@ export const createNodes = (deps: AgentDependencies) => {
       await deps.recorder.audit('run.sandboxed', {
         attempt: state.attemptNumber,
         verdict: outcome.verdict,
+        ...(outcome.durationMs === undefined ? {} : { durationMs: outcome.durationMs }),
       })
 
       return {

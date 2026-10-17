@@ -34,7 +34,8 @@ How to build it: [tasks.md](tasks.md). Wiring:
    If it is any other merge, store the delivery so the CLI can show it.
    A merge alone does **not** start a heal.
 
-Tokens: mint an installation token per GitHub call. Never store it.
+Tokens: installation tokens are minted on demand and live only in the
+worker's memory until shortly before they expire. Never store one.
 
 ## How the CLI works
 

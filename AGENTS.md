@@ -79,8 +79,9 @@ Backend (from docs/backend-architecture.md):
   row. Use the `add-agent-tool` skill for `merge_pull_request`.
 - Every agent tool is allowlisted, logged to `tool_invocations` / `audit_events` with `run_id`, and
   unknown calls fail closed.
-- GitHub installation tokens are minted per call and never stored in Electron, checkpoints, prompts,
-  logs or the sandbox.
+- GitHub installation tokens are minted on demand, reused only from worker memory until shortly
+  before they expire, and never stored in Electron, checkpoints, prompts, logs, the database or
+  the sandbox.
 - No PR and no merge without a passing `sandbox_results` row.
 
 ## Performance
