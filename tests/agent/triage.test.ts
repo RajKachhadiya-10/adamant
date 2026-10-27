@@ -152,4 +152,21 @@ describe('CI failure triage', () => {
     // Redaction must not eat the location the model needs to find the fix.
     assert.equal(failure.location, 'src/client.ts:9')
   })
+
+  it('redacts all of an API key that contains underscores, not just its head', () => {
+    const tail = 'Qr7_xYz-0123456789_abcdEFGH'
+    const leaky = [
+      `Error: OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOp_${tail} was rejected`,
+      'Error: ANTHROPIC_API_KEY=sk-ant-api03-AbCdEfGhIjKlMnOp_QrStUv-wx_yz is invalid',
+      '    at src/client.ts:9:3',
+    ].join('\n')
+
+    const failure = parseFailure(leaky)
+
+    for (const text of [failure.excerpt, String(failure.firstError)]) {
+      assert.equal(text.includes(tail), false)
+      assert.equal(text.includes('QrStUv-wx_yz'), false)
+    }
+    assert.match(String(failure.firstError), /^Error: OPENAI_API_KEY=\[redacted\] was rejected$/)
+  })
 })
