@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { afterEach, describe, it } from 'node:test'
+import { normalizePatch } from '../../server/agent/patch.ts'
 import {
   assertAllowed,
   execGit,
@@ -316,6 +317,28 @@ describe('GitWorkspace against real git', () => {
     await ws.applyPatch(fix.replace('@@ -1,3 +1,3 @@', '@@ -1,7 +1,9 @@'))
 
     assert.match(await fs.readFile(path.join(dir, 'src/sum.ts'), 'utf8'), /return a \+ b/)
+  })
+
+  it('applies a normalized two-file diff that came without diff --git lines', async () => {
+    const { dir, ws } = await repoWithBase()
+    const reply = [
+      '--- a/src/sum.ts',
+      '+++ b/src/sum.ts',
+      '@@ -1,3 +1,3 @@',
+      ' export function sum(a, b) {',
+      '-  return a - b',
+      '+  return a + b',
+      ' }',
+      '--- /dev/null',
+      '+++ b/src/mul.ts',
+      '@@ -0,0 +1 @@',
+      '+export const mul = (a, b) => a * b',
+    ].join('\n')
+
+    await ws.applyPatch(normalizePatch(reply))
+
+    assert.match(await fs.readFile(path.join(dir, 'src/sum.ts'), 'utf8'), /return a \+ b/)
+    assert.match(await fs.readFile(path.join(dir, 'src/mul.ts'), 'utf8'), /export const mul/)
   })
 
   it('commits the candidate and nothing the sandbox wrote', async () => {

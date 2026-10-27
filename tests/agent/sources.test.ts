@@ -31,7 +31,48 @@ describe('normalizePatch', () => {
   it('joins one fenced diff per file into a single patch', () => {
     const second = '--- a/src/mul.ts\n+++ b/src/mul.ts\n@@ -1 +1 @@\n-c\n+d\n'
     const reply = `\`\`\`diff\n${diff}\`\`\`\n\nAnd:\n\n\`\`\`diff\n${second}\`\`\`\n`
-    assert.equal(normalizePatch(reply), diff + second)
+    assert.equal(
+      normalizePatch(reply),
+      `diff --git a/src/sum.ts b/src/sum.ts\n${diff}diff --git a/src/mul.ts b/src/mul.ts\n${second}`,
+    )
+  })
+
+  it('gives each file of a multi-file diff without git headers its own diff --git line', () => {
+    // Without them `git apply --recount` reads the second header as hunk lines.
+    const second = '--- a/src/mul.ts\t2026-10-28 10:00:00\n+++ b/src/mul.ts\n@@ -1 +1 @@\n-c\n+d\n'
+    assert.equal(
+      normalizePatch(diff + second),
+      `diff --git a/src/sum.ts b/src/sum.ts\n${diff}diff --git a/src/mul.ts b/src/mul.ts\n${second}`,
+    )
+  })
+
+  it('marks created and deleted files so git does not look for /dev/null', () => {
+    const created = '--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+fresh\n'
+    const deleted = '--- a/src/old.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-stale\n'
+    assert.equal(
+      normalizePatch(created + deleted),
+      [
+        'diff --git a/src/new.ts b/src/new.ts',
+        'new file mode 100644',
+        created + 'diff --git a/src/old.ts b/src/old.ts',
+        'deleted file mode 100644',
+        deleted,
+      ].join('\n'),
+    )
+  })
+
+  it('leaves a diff that already has diff --git lines as it is', () => {
+    const git = `diff --git a/src/sum.ts b/src/sum.ts\n${diff}--- a/src/mul.ts\n+++ b/src/mul.ts\n@@ -1 +1 @@\n-c\n+d\n`
+    assert.equal(normalizePatch(git), git)
+  })
+
+  it('adds no header to a rename or to names without a/ and b/', () => {
+    const renamed = '--- a/src/old.ts\n+++ b/src/new.ts\n@@ -1 +1 @@\n-a\n+b\n'
+    const bare = '--- src/mul.ts\n+++ src/mul.ts\n@@ -1 +1 @@\n-c\n+d\n'
+    assert.equal(
+      normalizePatch(diff + renamed + bare),
+      `diff --git a/src/sum.ts b/src/sum.ts\n${diff}${renamed}${bare}`,
+    )
   })
 
   it('does not end the fence at a fence line inside a diff of a Markdown file', () => {

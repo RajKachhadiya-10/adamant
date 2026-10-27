@@ -17,6 +17,44 @@ const fromHeader = (body: string) => {
   return start > 0 ? body.slice(start) : body
 }
 
+const PLAIN_FILE_HEADER = /^--- ([^\n]+)\n\+\+\+ ([^\n]+)\n(?=@@)/gm
+
+/** The path after `a/` or `b/`; null for /dev/null; undefined when git would read it otherwise. */
+function headerPath(name: string, prefix: 'a/' | 'b/'): string | null | undefined {
+  // `diff -u` puts a tab and a timestamp after the name.
+  const path = name.split('\t')[0]?.trim() ?? ''
+  if (path === '/dev/null') return null
+  return path.startsWith(prefix) && path.length > prefix.length
+    ? path.slice(prefix.length)
+    : undefined
+}
+
+/**
+ * `git apply --recount` ends a hunk at the next `diff ` or `@@ ` line. Without
+ * `diff --git` lines, which models often leave out, a second file's `---` and
+ * `+++` read as two more lines of the first file's last hunk and git rejects
+ * the whole patch. One file applies either way, so it keeps its bytes.
+ */
+function withGitHeaders(patch: string): string {
+  if (/^diff --git /m.test(patch)) return patch
+  if ([...patch.matchAll(PLAIN_FILE_HEADER)].length < 2) return patch
+
+  return patch.replace(PLAIN_FILE_HEADER, (header, oldName: string, newName: string) => {
+    const from = headerPath(oldName, 'a/')
+    const to = headerPath(newName, 'b/')
+    // A rename needs `rename from`/`rename to` lines a plain diff never has; left
+    // as it was, it fails the way it did before.
+    if (from === undefined || to === undefined || (from !== null && to !== null && from !== to)) {
+      return header
+    }
+    const path = to ?? from
+    if (path === null) return header
+    const mode =
+      from === null ? 'new file mode 100644\n' : to === null ? 'deleted file mode 100644\n' : ''
+    return `diff --git a/${path} b/${path}\n${mode}${header}`
+  })
+}
+
 export function normalizePatch(reply: string): string {
   // The API never means a carriage return; against an LF checkout it makes
   // every context line mismatch.
@@ -28,7 +66,7 @@ export function normalizePatch(reply: string): string {
   // file, still yields one patch. With no diff-shaped fence, the first fence
   // (or the whole reply) is handed to git as before.
   if (diffs.length > 0) {
-    return diffs.map((body) => withFinalNewline(fromHeader(body))).join('')
+    return withGitHeaders(diffs.map((body) => withFinalNewline(fromHeader(body))).join(''))
   }
-  return withFinalNewline(fromHeader(fences[0] ?? text))
+  return withGitHeaders(withFinalNewline(fromHeader(fences[0] ?? text)))
 }
