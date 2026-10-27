@@ -265,8 +265,11 @@ export function createMemoryWebhookStore(): MemoryWebhookStore {
     },
     async markDeliveryProcessed() {},
     async createQueuedRun(input) {
-      if (idempotencyKeys.has(input.idempotencyKey)) return null
-      idempotencyKeys.add(input.idempotencyKey)
+      // Per repository, as the Postgres index is: a fork and its upstream share
+      // SHAs, so `workflow_run:{sha}` alone would drop the second repository's run.
+      const key = JSON.stringify([input.repositoryId, input.idempotencyKey])
+      if (idempotencyKeys.has(key)) return null
+      idempotencyKeys.add(key)
       queuedRuns.push(input)
       enqueuedRuns.push(input.runId)
       return input.runId

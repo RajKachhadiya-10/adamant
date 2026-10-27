@@ -241,6 +241,30 @@ describe('webhook triggers a heal', () => {
     assert.equal(store.deliveries.has('delivery-lint'), true)
   })
 
+  it('starts a heal in each repository that fails on the same commit', async () => {
+    const { store, enqueued, webhooks } = service()
+    // A fork with the App installed has its upstream's SHAs and its own CI.
+    const fork = { ...repository, id: 5678, full_name: 'acme/eval-fork', name: 'eval-fork' }
+
+    const upstream = await webhooks.processEvent('delivery-up', 'workflow_run', failedWorkflow)
+    const forked = await webhooks.processEvent('delivery-fork', 'workflow_run', {
+      ...failedWorkflow,
+      repository: fork,
+      workflow_run: { ...failedRun, head_repository: { id: fork.id } },
+    })
+
+    assert.ok(upstream.runId)
+    assert.ok(forked.runId)
+    assert.deepEqual(
+      store.queuedRuns.map((run) => [run.repositoryId, run.idempotencyKey]),
+      [
+        ['repository-1234', 'workflow_run:deadbeef'],
+        ['repository-5678', 'workflow_run:deadbeef'],
+      ],
+    )
+    assert.deepEqual(enqueued, [upstream.runId, forked.runId])
+  })
+
   it('never heals a failure that would merge commits from elsewhere', async () => {
     const { store, enqueued, webhooks } = service()
     const cases = {
