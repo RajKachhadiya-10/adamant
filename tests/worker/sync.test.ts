@@ -48,7 +48,7 @@ type Fake = {
   installations?: AppInstallation[]
   repos?: Record<number, InstallationRepository[] | Error>
   heads?: Record<string, { headSha: string; runs: WorkflowRunSummary[] } | null | Error>
-  prs?: Record<number, { state: string; merged: boolean }>
+  prs?: Record<number, { state: string; merged: boolean } | Error>
 }
 
 function fakeGithub(fake: Fake): SyncGitHub & { headCalls: string[] } {
@@ -70,7 +70,9 @@ function fakeGithub(fake: Fake): SyncGitHub & { headCalls: string[] } {
       return head === undefined ? { headSha: RED, runs: [failed()] } : head
     },
     async pullRequestState({ prNumber }) {
-      return fake.prs?.[prNumber] ?? { state: 'open', merged: false }
+      const pr = fake.prs?.[prNumber]
+      if (pr instanceof Error) throw pr
+      return pr ?? { state: 'open', merged: false }
     },
   }
 }
@@ -283,5 +285,30 @@ describe('GitHub sync', () => {
     })
     const again = await syncGithub(github, store, ids)
     assert.deepStrictEqual(again.reviewed, [])
+  })
+
+  it('continues settling review runs when one pull request check fails', async () => {
+    const review = (runId: string, prNumber: number): ReviewRun => ({
+      runId,
+      owner: 'vaishcodescape',
+      name: 'test-repo-swe',
+      installationId: '171643878',
+      prNumber,
+    })
+    const { store } = memoryStore([review('broken', 10), review('merged', 11)])
+    const github = fakeGithub({
+      heads: { 'vaishcodescape/test-repo-swe': null },
+      prs: {
+        10: new Error('GitHub GET failed: 502'),
+        11: { state: 'closed', merged: true },
+      },
+    })
+    const report = await syncGithub(github, store, ids)
+    assert.deepStrictEqual(report.reviewed, ['merged'])
+    assert.deepStrictEqual(report.errors, ['run broken: GitHub GET failed: 502'])
+    assert.deepStrictEqual(Object.fromEntries(store.finished), {
+      merged: 'succeeded',
+    })
+    assert.strictEqual(store.finished.has('broken'), false)
   })
 })
