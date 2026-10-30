@@ -142,8 +142,12 @@ function brief(failure: FailureContext, sources: readonly SourceExcerpt[]): stri
  * recorder's redaction keeps the counts.
  */
 function agentUsage(responses: readonly { usage: Usage }[]) {
-  const sum = (details: readonly Record<string, number>[], key: string) =>
-    details.reduce((total, detail) => total + (detail[key] ?? 0), 0)
+  // Since @openai/agents 0.21 a detail value may be a nested breakdown, not a count.
+  const sum = (details: readonly Record<string, unknown>[], key: string) =>
+    details.reduce((total, detail) => {
+      const count = detail[key]
+      return total + (typeof count === 'number' ? count : 0)
+    }, 0)
   const usage = { input: 0, cached: 0, output: 0, reasoning: 0 }
   for (const { usage: spent } of responses) {
     usage.input += spent.inputTokens

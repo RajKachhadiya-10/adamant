@@ -1,6 +1,6 @@
 # API image. Source stays split under server/api, server/db, and server/worker,
 # but they share one package.json.
-FROM node:26.11-bookworm-slim AS deps
+FROM node:26.13-bookworm-slim AS deps
 
 RUN npm install -g pnpm@10
 
@@ -18,7 +18,7 @@ COPY electron/shared/package.json electron/shared/package.json
 
 RUN pnpm install --frozen-lockfile --filter @adamant/server --prod --ignore-scripts
 
-FROM node:26.11-bookworm-slim AS runner
+FROM node:26.13-bookworm-slim AS runner
 
 ENV NODE_ENV=production
 ENV PORT=8787
