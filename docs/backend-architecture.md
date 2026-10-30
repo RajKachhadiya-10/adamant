@@ -118,20 +118,20 @@ created.
 
 ## Auth
 
-| Route                               | Auth                  | Does                                            |
-| ----------------------------------- | --------------------- | ----------------------------------------------- |
-| GitHub webhook                      | `X-Hub-Signature-256` | Insert `webhook_deliveries`; maybe create a run |
-| `POST /runs`                        | Session               | Start a run                                     |
-| `GET /runs`                         | Session               | CLI list                                        |
-| `GET /runs/:id`                     | Session               | CLI detail                                      |
-| `GET /activity`                     | Session               | CLI watch (deliveries + audit, newest first)    |
-| `GET /github/install`               | Session               | Public install URL from `GITHUB_APP_SLUG`       |
-| `GET /github/installations/status`  | Session               | Exact `repositories` owner and name, or 404     |
-| `GET /auth/{github,google}`         | None, rate-limited    | Browser sign-in: state + PKCE, redirect         |
-| `POST /auth/github/cli/start`       | None, rate-limited    | Start a terminal sign-in (below)                |
-| `GET /auth/github/cli/begin`        | None, rate-limited    | The terminal's browser link to GitHub           |
-| `GET/POST /auth/github/cli/confirm` | Confirmation cookie   | Show the code; confirm or cancel                |
-| `POST /auth/github/cli/token`       | Poll secret           | 202 until confirmed, then the token once        |
+| Route                               | Auth                  | Does                                                |
+| ----------------------------------- | --------------------- | --------------------------------------------------- |
+| GitHub webhook                      | `X-Hub-Signature-256` | Insert `webhook_deliveries`; maybe create a run     |
+| `POST /runs`                        | Session, rate-limited | Start a run (10 at once, then 2 a minute, per user) |
+| `GET /runs`                         | Session               | CLI list                                            |
+| `GET /runs/:id`                     | Session               | CLI detail                                          |
+| `GET /activity`                     | Session               | CLI watch (deliveries + audit, newest first)        |
+| `GET /github/install`               | Session               | Public install URL from `GITHUB_APP_SLUG`           |
+| `GET /github/installations/status`  | Session               | Exact `repositories` owner and name, or 404         |
+| `GET /auth/{github,google}`         | None, rate-limited    | Browser sign-in: state + PKCE, redirect             |
+| `POST /auth/github/cli/start`       | None, rate-limited    | Start a terminal sign-in (below)                    |
+| `GET /auth/github/cli/begin`        | None, rate-limited    | The terminal's browser link to GitHub               |
+| `GET/POST /auth/github/cli/confirm` | Confirmation cookie   | Show the code; confirm or cancel                    |
+| `POST /auth/github/cli/token`       | Poll secret           | 202 until confirmed, then the token once            |
 
 A session is a random token sent as `Authorization: Bearer` (or the
 `adamant_session` cookie for a browser); Postgres keeps its SHA-256 only. A

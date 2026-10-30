@@ -11,6 +11,8 @@ export type RateLimitOptions = {
   now?: () => number
   /** Which client a request counts against. Defaults to its peer address. */
   clientKey?: (c: Context) => string
+  /** The 429 body's error. Defaults to the sign-in wording this was written for. */
+  message?: string
 }
 
 type Bucket = { tokens: number; at: number }
@@ -60,13 +62,15 @@ function peerKey(c: Context): string {
 /**
  * A token bucket per client, held in this process: each instance limits on its own,
  * so N instances allow N times the budget, and a restart forgets it. It is meant
- * for the unauthenticated routes that write a row per request, so a flood cannot
- * fill Postgres faster than the hourly cleanup empties it.
+ * for routes where each request costs something: the unauthenticated ones that
+ * write a row (so a flood cannot fill Postgres faster than the hourly cleanup
+ * empties it), and starting a run, which spends model tokens and sandbox time.
  */
 export function createRateLimit(options: RateLimitOptions): MiddlewareHandler {
   const now = options.now ?? Date.now
   const keyOf = options.clientKey ?? peerKey
   const maxClients = options.maxClients ?? DEFAULT_MAX_CLIENTS
+  const message = options.message ?? 'Too many sign-in attempts. Try again shortly.'
   const perMs = options.perMinute / 60_000
   const buckets = new Map<string, Bucket>()
 
@@ -84,7 +88,7 @@ export function createRateLimit(options: RateLimitOptions): MiddlewareHandler {
       buckets.set(key, { tokens, at: time })
       c.header('Retry-After', String(Math.ceil((1 - tokens) / perMs / 1000)))
       c.header('Cache-Control', 'no-store')
-      return c.json({ error: 'Too many sign-in attempts. Try again shortly.' }, 429)
+      return c.json({ error: message }, 429)
     }
     buckets.set(key, { tokens: tokens - 1, at: time })
     for (const oldest of buckets.keys()) {

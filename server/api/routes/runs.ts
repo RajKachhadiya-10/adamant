@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { type MiddlewareHandler } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { createAuthMiddleware, type AuthVariables } from '../middleware/auth.ts'
+import { createRateLimit } from '../middleware/rateLimit.ts'
 import {
   createDefaultRunApiStore,
   UnknownRepositoryError,
@@ -20,6 +21,13 @@ const MAX_RUN_REQUEST_BYTES = 16 * 1024
 // retry; a client-chosen value has no reason to be longer than this.
 const MAX_IDEMPOTENCY_KEY_LENGTH = 255
 
+// Every new run is paid for: model tokens, a sandbox container, GitHub API
+// calls. A person starts a handful; a script with a session started any number,
+// each with a fresh idempotency key. Per user, not per address, so a shared
+// network does not share one budget and a second address does not double it.
+const RUN_START_BURST = 10
+const RUN_STARTS_PER_MINUTE = 2
+
 function readString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
@@ -27,11 +35,22 @@ function readString(value: unknown): string | undefined {
 export function createRunsRoute(
   store: RunApiStore = createDefaultRunApiStore(),
   requireSession: MiddlewareHandler = createAuthMiddleware(),
+  options: { limitRunStarts?: MiddlewareHandler } = {},
 ) {
   const route = new Hono<{ Variables: AuthVariables }>()
   route.use('*', requireSession)
 
-  route.post('/', bodyLimit({ maxSize: MAX_RUN_REQUEST_BYTES }), async (c) => {
+  const limitRunStarts =
+    options.limitRunStarts ??
+    createRateLimit({
+      burst: RUN_START_BURST,
+      perMinute: RUN_STARTS_PER_MINUTE,
+      // After requireSession, so the user is known.
+      clientKey: (c) => `user:${String(c.get('userId'))}`,
+      message: 'Too many runs started. Try again in a minute.',
+    })
+
+  route.post('/', limitRunStarts, bodyLimit({ maxSize: MAX_RUN_REQUEST_BYTES }), async (c) => {
     const key = c.req.header('idempotency-key')
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
     // A regex test coerces its argument, so `['<sha>']` passed as a SHA and was

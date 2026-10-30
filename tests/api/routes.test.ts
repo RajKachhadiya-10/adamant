@@ -172,4 +172,54 @@ describe('CLI run routes', () => {
 
     assert.equal(response.status, 404)
   })
+
+  it('limits how many runs one user starts, without slowing reads or other users', async () => {
+    let created = 0
+    const store = {
+      create: async () => {
+        created += 1
+        return { run, created: true }
+      },
+      list: async () => [run],
+      detail: async () => null,
+    } satisfies RunApiStore
+    const sessions: Record<string, string> = {
+      alice: '00000000-0000-0000-0000-00000000000a',
+      bob: '00000000-0000-0000-0000-00000000000b',
+    }
+    const route = createRunsRoute(
+      store,
+      createAuthMiddleware({
+        authenticate: async (token) => {
+          const id = sessions[token]
+          return id ? { sessionId: `session-${token}`, userId: id } : null
+        },
+      }),
+    )
+    // A fresh key each time, as a script would send, so idempotency cannot absorb them.
+    const start = (who: string, key: string) =>
+      route.request('/', {
+        method: 'POST',
+        headers: {
+          ADAMANT_SESSION: who,
+          'content-type': 'application/json',
+          'idempotency-key': key,
+        },
+        body: JSON.stringify({ repositoryId: 'repo-1', sourceSha: 'a'.repeat(40) }),
+      })
+
+    for (let index = 0; index < 10; index += 1) {
+      assert.equal((await start('alice', `key-${index}`)).status, 202, `start ${index + 1}`)
+    }
+    const refused = await start('alice', 'key-10')
+
+    assert.equal(refused.status, 429)
+    assert.deepEqual(await refused.json(), {
+      error: 'Too many runs started. Try again in a minute.',
+    })
+    assert.ok(Number(refused.headers.get('retry-after')) > 0)
+    assert.equal(created, 10, 'the refused start never reached the store')
+    assert.equal((await route.request('/', { headers: { ADAMANT_SESSION: 'alice' } })).status, 200)
+    assert.equal((await start('bob', 'key-b')).status, 202, 'another user has their own budget')
+  })
 })
