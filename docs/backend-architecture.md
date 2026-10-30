@@ -520,7 +520,13 @@ sequenceDiagram
 
 Host clones, strips remotes and credentials, then starts the container.
 
-- network off during tests (registry allowlist only for install)
+- network off during tests. Install runs on Docker's default bridge with the
+  network on; there is no registry allowlist yet, so anything the install runs
+  can reach the internet and the host's network
+- on a cloud host, block the instance metadata address for containers, or an
+  install script can read the host's cloud credentials:
+  `iptables -I DOCKER-USER -d 169.254.169.254 -j DROP` (AWS, GCP and Azure all
+  serve credentials there; make the rule persistent)
 - no `docker.sock`, dropped caps, memory / CPU / PID / time limits
 - one container per job, destroyed on exit
 - a package cache per repository, mounted at `/adamant-cache` during install

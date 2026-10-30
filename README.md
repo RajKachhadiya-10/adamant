@@ -120,6 +120,7 @@ touch a repository, and the worker does the work but never sees a user session.
 | Variable                                                 | Read by     | What it is                                                                                                                           |
 | -------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `DATABASE_URL`                                           | API, worker | Postgres connection string                                                                                                           |
+| `POSTGRES_PASSWORD`                                      | Compose     | Postgres password, default `adamant`; set it on any shared host. Compose publishes Postgres on `127.0.0.1` only                      |
 | `PORT`                                                   | API         | HTTP port, default `8787`                                                                                                            |
 | `GITHUB_WEBHOOK_SECRET`                                  | API         | HMAC on every delivery; a bad signature is a 401 and stores nothing                                                                  |
 | `GITHUB_APP_SLUG`                                        | API         | Public App slug for the install URL; not a credential                                                                                |
