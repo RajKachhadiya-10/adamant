@@ -1,0 +1,37 @@
+# Weekly update PRs, so a vulnerable dependency does not sit unnoticed until
+# someone runs `pnpm audit`. Minor and patch updates are grouped into one PR per
+# ecosystem to keep review load (and the CodeRabbit allowance) small; major
+# updates arrive one by one because they can break things.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    directory: /tui
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+
+  # The API and worker images (Dockerfile, Dockerfile.worker).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
