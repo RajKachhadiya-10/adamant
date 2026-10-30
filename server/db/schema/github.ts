@@ -18,6 +18,13 @@ export const githubInstallations = pgTable(
      * a login can be renamed. Null on rows written before it was recorded.
      */
     accountGithubId: bigint('account_github_id', { mode: 'number' }),
+    /**
+     * GitHub's numeric id for the person who installed the App (the `sender` of
+     * `installation.created`). An organization never signs in, so for an org
+     * installation this is the user whose merge setting applies. Null when the
+     * installation was first seen some other way, such as the worker's sync.
+     */
+    installedByGithubId: bigint('installed_by_github_id', { mode: 'number' }),
     // 'User' or 'Organization' from GitHub. Not checked: the webhook stores
     // whatever the payload says, and GitHub may add account types.
     accountType: text('account_type').notNull(),

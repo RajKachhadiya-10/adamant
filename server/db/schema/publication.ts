@@ -23,6 +23,12 @@ export const prPublications = pgTable(
     prUrl: text('pr_url').notNull(),
     baseSha: text('base_sha').notNull(),
     candidateHash: text('candidate_hash').notNull(),
+    /**
+     * The commit the worker pushed after the sandbox passed. The merge is pinned to
+     * it, so a later push to `adamant/{run_id}` is never merged untested. Null on
+     * rows written before it was recorded; those runs are not merged by Adamant.
+     */
+    headSha: text('head_sha'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

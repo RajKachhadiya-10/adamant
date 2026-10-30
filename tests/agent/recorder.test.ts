@@ -361,9 +361,25 @@ describe('createMemoryRecorder', () => {
       prUrl: 'https://github.com/acme/eval/pull/42',
       baseSha: 'sha1',
       candidateHash: 'abc',
+      headSha: 'ab12'.repeat(10),
     })
 
     assert.equal(await recorder.publishedPrNumber(), 42)
+  })
+
+  it('publishedHeadSha returns null before a PR, then the head stored with it', async () => {
+    const recorder = createMemoryRecorder()
+    assert.equal(await recorder.publishedHeadSha(), null)
+
+    await recorder.prPublication({
+      prNumber: 42,
+      prUrl: 'https://github.com/acme/eval/pull/42',
+      baseSha: 'sha1',
+      candidateHash: 'abc',
+      headSha: 'ab12'.repeat(10),
+    })
+
+    assert.equal(await recorder.publishedHeadSha(), 'ab12'.repeat(10))
   })
 
   it('patchAttempt stores the record without modification', async () => {

@@ -92,6 +92,7 @@ export function createPostgresRecorder(db: Db, context: RecorderContext): RunRec
           prUrl: record.prUrl,
           baseSha: record.baseSha,
           candidateHash: record.candidateHash,
+          headSha: record.headSha,
         })
         .onConflictDoNothing()
     },
@@ -115,6 +116,16 @@ export function createPostgresRecorder(db: Db, context: RecorderContext): RunRec
         .limit(1)
 
       return rows[0]?.prNumber ?? null
+    },
+
+    async publishedHeadSha() {
+      const rows = await db
+        .select({ headSha: prPublications.headSha })
+        .from(prPublications)
+        .where(eq(prPublications.runId, context.runId))
+        .limit(1)
+
+      return rows[0]?.headSha ?? null
     },
   }
 }

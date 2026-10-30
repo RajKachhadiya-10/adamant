@@ -37,6 +37,8 @@ type InstallationPayload = {
 
 type EventPayload = {
   action?: string
+  /** Who triggered the event. On `installation.created`, the person who installed. */
+  sender?: { id?: number }
   installation?: InstallationPayload
   repository?: RepositoryPayload
   /** `installation` events list repos here, not on `repository`. */
@@ -106,16 +108,21 @@ function repositoryIdentity(repository: RepositoryPayload): {
 
 export function createWebhookService(deps: WebhookDependencies) {
   /** Both rows are keyed on GitHub's numeric ids, so this is safe to repeat. */
-  async function bind(store: WebhookStore, payload: EventPayload) {
+  async function bind(store: WebhookStore, event: string, payload: EventPayload) {
     const installationId = payload.installation?.id
     if (!installationId) return { installationRowId: null, repositoryRowId: null }
 
     const accountGithubId = payload.installation?.account?.id
+    // On any other event the sender is whoever pushed or opened a PR, not the
+    // installer, so only `installation.created` may set it.
+    const installedByGithubId =
+      event === 'installation' && payload.action === 'created' ? payload.sender?.id : undefined
     const installationRowId = await store.upsertInstallation({
       githubInstallationId: installationId,
       accountLogin: payload.installation?.account?.login ?? 'unknown',
       accountType: payload.installation?.account?.type ?? 'Organization',
       ...(typeof accountGithubId === 'number' ? { accountGithubId } : {}),
+      ...(typeof installedByGithubId === 'number' ? { installedByGithubId } : {}),
     })
 
     const listed = [
@@ -241,7 +248,7 @@ export function createWebhookService(deps: WebhookDependencies) {
     ): Promise<WebhookResult> {
       return deps.store.transaction(async (store) => {
         const payload = (rawPayload ?? {}) as EventPayload
-        const { installationRowId, repositoryRowId } = await bind(store, payload)
+        const { installationRowId, repositoryRowId } = await bind(store, event, payload)
 
         const stored = await store.recordDelivery({
           deliveryId,

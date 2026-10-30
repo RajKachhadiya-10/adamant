@@ -16,9 +16,11 @@ export interface GitProvider {
    */
   applyPatch(patch: string): Promise<void>
   commit(message: string): Promise<void>
-  push(branch: string): Promise<void>
+  /** Resolves to the commit SHA that was pushed. */
+  push(branch: string): Promise<string>
   openPr(branch: string, base: string, title: string, body: string): Promise<PullRequestRef>
-  mergePr(prNumber: number): Promise<void>
+  /** Merges only while the PR's head is still `headSha`, the commit the sandbox passed. */
+  mergePr(prNumber: number, headSha: string): Promise<void>
   /** Logs of the failed jobs only, never the whole workflow run. */
   getFailureLogs(): Promise<string>
   /**

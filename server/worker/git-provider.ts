@@ -45,7 +45,7 @@ export function createGitHubGitProvider(
     },
 
     async push(branch) {
-      await workspace.push(branch)
+      return workspace.push(branch)
     },
 
     async openPr(branch, base, title, body): Promise<PullRequestRef> {
@@ -58,11 +58,12 @@ export function createGitHubGitProvider(
       return github.createPullRequest({ ...repo, head: branch, base, title, body })
     },
 
-    async mergePr(prNumber) {
+    async mergePr(prNumber, headSha) {
       await github.mergePullRequest({
         ...repo,
         prNumber,
         headRef: workspace.agentBranch,
+        headSha,
         commitTitle: `Adamant run ${context.runId} (#${prNumber})`,
       })
     },

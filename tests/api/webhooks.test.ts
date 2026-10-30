@@ -365,6 +365,34 @@ describe('webhook triggers a heal', () => {
     assert.equal('accountGithubId' in (store.boundInstallations[1] ?? {}), false)
   })
 
+  it('records who installed the App, and only from installation.created', async () => {
+    const { store, webhooks } = service()
+
+    await webhooks.processEvent('delivery-created', 'installation', {
+      action: 'created',
+      sender: { id: 777 },
+      installation,
+      repository,
+    })
+    // On other events the sender is whoever acted (a pusher, an admin), not the installer.
+    await webhooks.processEvent('delivery-perms', 'installation', {
+      action: 'new_permissions_accepted',
+      sender: { id: 888 },
+      installation,
+    })
+    await webhooks.processEvent('delivery-ci', 'workflow_run', {
+      action: 'completed',
+      sender: { id: 999 },
+      installation,
+      repository,
+      workflow_run: { conclusion: 'success', head_sha: 'cafe', head_branch: 'main' },
+    })
+
+    assert.equal(store.boundInstallations[0]?.installedByGithubId, 777)
+    assert.equal('installedByGithubId' in (store.boundInstallations[1] ?? {}), false)
+    assert.equal('installedByGithubId' in (store.boundInstallations[2] ?? {}), false)
+  })
+
   it('binds repositories listed on an installation payload', async () => {
     const { store, webhooks } = service()
 

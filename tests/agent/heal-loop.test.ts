@@ -27,10 +27,14 @@ const failingLog = [
   '      at src/sum.ts:4:11',
 ].join('\n')
 
+/** What the fake push reports as the commit it sent. */
+const PUSHED_SHA = 'feed'.repeat(10)
+
 type Journal = {
   calls: string[]
   branches: string[]
   merged: number[]
+  mergedHeads: string[]
   prBase: string[]
   applied: string[]
 }
@@ -47,15 +51,17 @@ function fakeGit(journal: Journal, overrides: Partial<GitProvider> = {}): GitPro
     push: async (branch) => {
       journal.calls.push('push')
       journal.branches.push(branch)
+      return PUSHED_SHA
     },
     openPr: async (_branch, base) => {
       journal.calls.push('openPr')
       journal.prBase.push(base)
       return { number: 77, url: 'https://github.com/acme/eval/pull/77' }
     },
-    mergePr: async (prNumber) => {
+    mergePr: async (prNumber, headSha) => {
       journal.calls.push('mergePr')
       journal.merged.push(prNumber)
+      journal.mergedHeads.push(headSha)
     },
     getFailureLogs: async () => failingLog,
     readFile: async (fromLog) =>
@@ -70,7 +76,7 @@ function fakeGit(journal: Journal, overrides: Partial<GitProvider> = {}): GitPro
 }
 
 function journal(): Journal {
-  return { calls: [], branches: [], merged: [], prBase: [], applied: [] }
+  return { calls: [], branches: [], merged: [], mergedHeads: [], prBase: [], applied: [] }
 }
 
 function scriptedLlm(patches: readonly string[], seen: Parameters<LlmProvider['patch']>[0][] = []) {
@@ -136,6 +142,8 @@ describe('autonomous heal loop', () => {
     assert.deepEqual(log.branches, ['adamant/run-77'])
     assert.deepEqual(log.prBase, ['main'], 'a PR bases on a branch, never on the failing SHA')
     assert.deepEqual(log.merged, [77])
+    assert.deepEqual(log.mergedHeads, [PUSHED_SHA], 'the merge is pinned to the pushed commit')
+    assert.equal(recorder.publications[0]?.headSha, PUSHED_SHA)
     assert.deepEqual(
       recorder.audits.map((row) => row.eventType),
       ['run.retrieved', 'run.sandboxed', 'run.pr_opened', 'run.merged'],

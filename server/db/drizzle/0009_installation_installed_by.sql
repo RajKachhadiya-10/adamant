@@ -1,0 +1,1 @@
+ALTER TABLE "github_installations" ADD COLUMN "installed_by_github_id" bigint;

@@ -1,0 +1,1 @@
+ALTER TABLE "pr_publications" ADD COLUMN "head_sha" text;

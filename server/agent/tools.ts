@@ -68,8 +68,9 @@ export class SecureGitClient {
     await this.guarded('git_commit', { message }, () => this.git.commit(message))
   }
 
-  async push(branch: string): Promise<void> {
-    await this.guarded('git_push', { branch }, async () => {
+  /** Resolves to the pushed commit, which the caller records with the PR. */
+  async push(branch: string): Promise<string> {
+    return this.guarded('git_push', { branch }, async () => {
       this.assertAgentBranch(branch, `Unauthorized push attempt to branch ${branch}.`)
       await this.assertSandboxPassed('push')
       return this.git.push(branch)
@@ -88,9 +89,10 @@ export class SecureGitClient {
   }
 
   /**
-   * Merges this run's pull request and nothing else. Both gates are read back
-   * from the recorder rather than taken from graph state, so an in-memory pass
-   * or an in-memory PR number that was never persisted cannot merge anything.
+   * Merges this run's pull request and nothing else. Every gate (the sandbox
+   * verdict, the PR number, the tested head commit) is read back from the
+   * recorder rather than taken from graph state, so anything in memory that was
+   * never persisted cannot merge anything.
    * `expectedPrNumber` is the caller's own view, cross-checked against it.
    */
   async mergePr(prNumber: number, expectedPrNumber: number | null): Promise<void> {
@@ -118,7 +120,17 @@ export class SecureGitClient {
         )
       }
 
-      await this.git.mergePr(prNumber)
+      // The sandbox passed one commit. Anything pushed to the branch after it
+      // (by a person or another process) was never tested, so the merge is
+      // pinned to the recorded head and refused without one.
+      const headSha = await this.recorder.publishedHeadSha()
+      if (!headSha) {
+        throw new ToolDeniedError(
+          `Cannot merge PR ${prNumber}. No tested head commit is recorded for it.`,
+        )
+      }
+
+      await this.git.mergePr(prNumber, headSha)
     })
   }
 

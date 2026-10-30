@@ -289,6 +289,10 @@ runs, and **`merge_pull_request`** for this run only.
   from graph state
 - the run's `pr_publications` row is set and matches the PR being merged
 - the PR head is `refs/heads/adamant/{run_id}` on the bound repo
+- the PR head commit is `pr_publications.head_sha`, the commit pushed after the
+  sandbox passed, and the merge call passes it as `sha` so GitHub refuses if the
+  head moves. A later push to the branch is never merged untested; a row with no
+  `head_sha` is not merged at all
 - squash merge (or the repo's one allowed method) — not a merge of some
   other branch
 
@@ -352,8 +356,10 @@ the App sends to a channel this machine does not forward, or has no secret.
 The terminal's approval mode is saved on the user (`users.auto_merge`,
 `PUT /settings`). Just before the merge the worker reads the mode of the
 run's creator, else of the user signed in with the GitHub account that
-owns the repository (`github_installations.account_github_id`), else
-merges. Manual leaves the PR open: the run ends `awaiting_hitl` with a
+owns the repository (`github_installations.account_github_id`), else of
+the user who installed the App (`github_installations.installed_by_github_id`,
+which is how an organization's repository gets a mode, since an organization
+never signs in), else merges. Manual leaves the PR open: the run ends `awaiting_hitl` with a
 `run.awaiting_review` event, and the sync marks it `succeeded` when someone
 merges the PR or `aborted` when it is closed.
 

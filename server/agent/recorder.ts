@@ -40,6 +40,8 @@ export interface PrPublicationRecord {
   readonly prUrl: string
   readonly baseSha: string
   readonly candidateHash: string
+  /** The commit pushed after the sandbox passed; the only head a merge accepts. */
+  readonly headSha: string
 }
 
 export interface RunRecorder {
@@ -52,6 +54,8 @@ export interface RunRecorder {
   latestSandboxVerdict(): Promise<SandboxVerdict | null>
   /** PR number persisted for this run, or null before one is opened. */
   publishedPrNumber(): Promise<number | null>
+  /** Head commit persisted with this run's PR, or null when none was recorded. */
+  publishedHeadSha(): Promise<string | null>
 }
 
 const SECRET_KEY_PARTS = ['token', 'secret', 'key', 'auth', 'password', 'credential', 'cookie']
@@ -153,6 +157,9 @@ export function createMemoryRecorder(): MemoryRecorder {
     },
     async publishedPrNumber() {
       return publications.at(-1)?.prNumber ?? null
+    },
+    async publishedHeadSha() {
+      return publications.at(-1)?.headSha ?? null
     },
   }
 }

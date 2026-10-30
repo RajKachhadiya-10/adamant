@@ -202,7 +202,8 @@ Never store secrets in `jsonb`.
 
 `auto_merge` is the terminal's approval mode (`PUT /settings`). Before a heal merges its PR the
 worker reads it for the run's creator, else for the user whose GitHub identity owns the
-repository's installation (`github_installations.account_github_id`); with neither it merges.
+repository's installation (`github_installations.account_github_id`), else for the user who
+installed the App (`github_installations.installed_by_github_id`); with none of them it merges.
 
 ### `user_identities`
 
@@ -292,12 +293,13 @@ Never log the raw secret. Never store GitHub user access tokens here.
 
 GitHub App installation. Tokens live only in worker memory and **must not** appear here.
 
-| Column                   | Type        | Constraints                        |
-| ------------------------ | ----------- | ---------------------------------- |
-| `id`                     | uuid        | PK                                 |
-| `github_installation_id` | bigint      | unique, not null                   |
-| `account_github_id`      | bigint      | nullable; the owner's GitHub id    |
-| `created_at`             | timestamptz | not null, default now() **(exec)** |
+| Column                   | Type        | Constraints                         |
+| ------------------------ | ----------- | ----------------------------------- |
+| `id`                     | uuid        | PK                                  |
+| `github_installation_id` | bigint      | unique, not null                    |
+| `account_github_id`      | bigint      | nullable; the owner's GitHub id     |
+| `installed_by_github_id` | bigint      | nullable; the installer's GitHub id |
+| `created_at`             | timestamptz | not null, default now() **(exec)**  |
 
 ### `repo_bindings`
 
@@ -494,9 +496,10 @@ Implement these next to the writes, with tests. Do not encode them as triggers i
    `sandbox_results.verdict` is `pass`.
 3. HITL `UPDATE` (later) must include `version` (409 on mismatch).
 4. `agent_branch` is always `adamant/{run_id}`.
-5. Merge only this run's PR (`runs.pr_number`, head `adamant/{run_id}`).
-   `merged` is written after that API call succeeds. `pull_request.closed`
-   may confirm; it must not merge again.
+5. Merge only this run's PR (`runs.pr_number`, head `adamant/{run_id}`), and only
+   while its head commit is `pr_publications.head_sha`, the commit pushed after the
+   sandbox passed. `merged` is written after that API call succeeds.
+   `pull_request.closed` may confirm; it must not merge again.
 6. Redact before persist. A test inserts a fake token in tool args and asserts the stored jsonb
    does not contain it.
 

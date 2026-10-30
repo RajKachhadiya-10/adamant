@@ -115,6 +115,7 @@ export function createRunStore(db: Db): RunStore {
         .select({
           createdBy: runs.createdByUserId,
           accountGithubId: githubInstallations.accountGithubId,
+          installedByGithubId: githubInstallations.installedByGithubId,
         })
         .from(runs)
         .innerJoin(repositories, eq(repositories.id, runs.repositoryId))
@@ -132,19 +133,25 @@ export function createRunStore(db: Db): RunStore {
           .limit(1)
         return rows[0]?.autoMerge ?? true
       }
-      if (owner.accountGithubId === null) return true
-      const rows = await db
-        .select({ autoMerge: users.autoMerge })
-        .from(userIdentities)
-        .innerJoin(users, eq(users.id, userIdentities.userId))
-        .where(
-          and(
-            eq(userIdentities.provider, 'github'),
-            eq(userIdentities.providerUserId, String(owner.accountGithubId)),
-          ),
-        )
-        .limit(1)
-      return rows[0]?.autoMerge ?? true
+      // A personal installation's account is a person who can sign in. An
+      // organization never signs in, so its installer's setting is the one that
+      // applies; without it, manual mode was ignored on every org repository.
+      for (const githubId of [owner.accountGithubId, owner.installedByGithubId]) {
+        if (githubId === null) continue
+        const rows = await db
+          .select({ autoMerge: users.autoMerge })
+          .from(userIdentities)
+          .innerJoin(users, eq(users.id, userIdentities.userId))
+          .where(
+            and(
+              eq(userIdentities.provider, 'github'),
+              eq(userIdentities.providerUserId, String(githubId)),
+            ),
+          )
+          .limit(1)
+        if (rows[0]) return rows[0].autoMerge
+      }
+      return true
     },
   }
 }

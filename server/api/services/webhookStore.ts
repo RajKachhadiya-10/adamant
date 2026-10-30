@@ -32,6 +32,8 @@ export interface InstallationInput {
   readonly accountType: string
   /** The account's numeric GitHub id; links the installation to a signed-in user. */
   readonly accountGithubId?: number
+  /** Who installed the App; only `installation.created` names them. */
+  readonly installedByGithubId?: number
 }
 
 export interface RepositoryInput {
@@ -81,6 +83,7 @@ export function createPostgresWebhookStore(db: Db): WebhookStore {
           accountLogin: input.accountLogin,
           accountType: input.accountType,
           accountGithubId: input.accountGithubId ?? null,
+          installedByGithubId: input.installedByGithubId ?? null,
         })
         .onConflictDoUpdate({
           target: githubInstallations.githubInstallationId,
@@ -90,6 +93,9 @@ export function createPostgresWebhookStore(db: Db): WebhookStore {
             ...(input.accountGithubId === undefined
               ? {}
               : { accountGithubId: input.accountGithubId }),
+            ...(input.installedByGithubId === undefined
+              ? {}
+              : { installedByGithubId: input.installedByGithubId }),
             updatedAt: new Date(),
           },
         })

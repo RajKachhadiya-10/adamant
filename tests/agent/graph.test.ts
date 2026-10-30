@@ -10,6 +10,8 @@ import {
 import { createMemoryRecorder, type MemoryRecorder } from '../../server/agent/recorder.ts'
 import { SecureGitClient } from '../../server/agent/tools.ts'
 
+const HEAD_SHA = 'ab12'.repeat(10)
+
 const repository = {
   owner: 'test',
   name: 'repo',
@@ -22,7 +24,7 @@ const mockGit = (overrides: Partial<GitProvider> = {}): GitProvider => ({
   checkout: async () => {},
   applyPatch: async () => {},
   commit: async () => {},
-  push: async () => {},
+  push: async () => HEAD_SHA,
   openPr: async () => ({ number: 123, url: 'https://github.com/test/repo/pull/123' }),
   mergePr: async () => {},
   getFailureLogs: async () => 'Error: boom at src/app.ts:10',
@@ -159,12 +161,17 @@ describe('SecureGitClient Tool Boundary', () => {
       verdict: 'pass',
     })
     const gateway = client(
-      { push: async (branch) => void (pushedBranch = branch) },
+      {
+        push: async (branch) => {
+          pushedBranch = branch
+          return HEAD_SHA
+        },
+      },
       'run-123',
       recorder,
     )
 
-    await gateway.push('adamant/run-123')
+    assert.strictEqual(await gateway.push('adamant/run-123'), HEAD_SHA)
     assert.strictEqual(pushedBranch, 'adamant/run-123')
   })
 
@@ -190,16 +197,52 @@ describe('SecureGitClient Tool Boundary', () => {
       prUrl: 'https://github.com/test/repo/pull/7',
       baseSha: 'abc',
       candidateHash: 'hash',
+      headSha: HEAD_SHA,
     })
 
+    let mergedHead = ''
     const gateway = client(
-      { mergePr: async (prNumber) => void (merged = prNumber) },
+      {
+        mergePr: async (prNumber, headSha) => {
+          merged = prNumber
+          mergedHead = headSha
+        },
+      },
       'run-1',
       recorder,
     )
     await gateway.mergePr(7, 7)
 
     assert.strictEqual(merged, 7)
+    assert.strictEqual(mergedHead, HEAD_SHA, 'the merge is pinned to the recorded head commit')
+  })
+
+  it('refuses to merge when no tested head commit is recorded for the PR', async () => {
+    const recorder = createMemoryRecorder()
+    await recorder.sandboxResult({
+      attemptNumber: 1,
+      candidateHash: 'hash',
+      baseSha: 'abc',
+      commands: ['npm test'],
+      verdict: 'pass',
+    })
+    // A row written before head commits were recorded.
+    recorder.publications.push({
+      prNumber: 7,
+      prUrl: 'https://github.com/test/repo/pull/7',
+      baseSha: 'abc',
+      candidateHash: 'hash',
+      headSha: '',
+    })
+    let called = false
+    const gateway = client({ mergePr: async () => void (called = true) }, 'run-1', recorder)
+
+    await assert.rejects(gateway.mergePr(7, 7), /No tested head commit is recorded/)
+    assert.strictEqual(called, false)
+    assert.deepStrictEqual(
+      recorder.tools.map((row) => [row.tool, row.outcome]),
+      [['merge_pull_request', 'denied']],
+    )
   })
 
   it('refuses to merge a PR this run never recorded publishing', async () => {
@@ -269,6 +312,7 @@ describe('SecureGitClient Tool Boundary', () => {
       prUrl: 'https://github.com/test/repo/pull/9',
       baseSha: 'abc',
       candidateHash: 'hash',
+      headSha: HEAD_SHA,
     })
 
     await assert.rejects(client({}, 'run-1', recorder).mergePr(10, 10), /This run published PR 9/)

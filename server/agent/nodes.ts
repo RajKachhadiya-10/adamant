@@ -245,7 +245,7 @@ export const createNodes = (deps: AgentDependencies) => {
 
         // One push, after the pass. See docs/performance.md.
         await git.commit(buildCommitMessage(state.failure, state.runId))
-        await git.push(branch)
+        const headSha = await git.push(branch)
 
         const pr = await git.openPr(
           branch,
@@ -273,8 +273,9 @@ export const createNodes = (deps: AgentDependencies) => {
           prUrl: pr.url,
           baseSha: state.baseSha,
           candidateHash: state.candidateHash,
+          headSha,
         })
-        await deps.recorder.audit('run.pr_opened', { prNumber: pr.number, prUrl: pr.url })
+        await deps.recorder.audit('run.pr_opened', { prNumber: pr.number, prUrl: pr.url, headSha })
 
         return { prNumber: pr.number, prUrl: pr.url, status: 'publishing' }
       } catch (error) {

@@ -358,16 +358,23 @@ export class GitWorkspace {
     return null
   }
 
-  /** Always `HEAD:refs/heads/adamant/{run_id}`, never a ref the model chose. */
-  async push(branch: string): Promise<void> {
+  /**
+   * Always `HEAD:refs/heads/adamant/{run_id}`, never a ref the model chose.
+   * Resolves to the commit pushed, which the merge is later pinned to.
+   */
+  async push(branch: string): Promise<string> {
     if (branch !== this.agentBranch) {
       throw new GitDeniedError(
         `Unauthorized push to ${branch}. Allowed branch: ${this.agentBranch}`,
       )
     }
+    // Read before the push, from the same HEAD the push sends.
+    const head = (await this.run(['rev-parse', '--verify', 'HEAD'])).stdout.trim()
+    assertCommitSha(head)
     await this.run(['push', '--quiet', 'origin', `HEAD:refs/heads/${this.agentBranch}`], {
       authenticated: true,
     })
+    return head
   }
 
   async cleanup(): Promise<void> {

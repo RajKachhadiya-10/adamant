@@ -204,10 +204,12 @@ describe('GitHub App client', () => {
     assert.equal(logs, '')
   })
 
+  const tested = 'ab12'.repeat(10)
+
   const ourPr = (overrides: Record<string, unknown> = {}) => ({
     state: 'open',
     merged: false,
-    head: { ref: 'adamant/run-1', repo: { full_name: 'acme/eval' } },
+    head: { ref: 'adamant/run-1', sha: tested, repo: { full_name: 'acme/eval' } },
     ...overrides,
   })
 
@@ -218,6 +220,7 @@ describe('GitHub App client', () => {
       name: 'eval',
       prNumber: 7,
       headRef: 'adamant/run-1',
+      headSha: tested,
       commitTitle: 'Adamant run run-1 (#7)',
     })
 
@@ -234,15 +237,18 @@ describe('GitHub App client', () => {
     const last = calls.at(-1)
     assert.equal(last?.method, 'PUT')
     assert.equal(last?.url, 'https://api.github.test/repos/acme/eval/pulls/7/merge')
-    assert.equal(JSON.parse(String(last?.body)).merge_method, 'squash')
+    const body = JSON.parse(String(last?.body))
+    assert.equal(body.merge_method, 'squash')
+    // GitHub answers 409 instead of merging if the head moves after the read.
+    assert.equal(body.sha, tested)
     assert.equal(calls.at(-2)?.url, 'https://api.github.test/repos/acme/eval/pulls/7')
   })
 
   it('refuses to merge a pull request whose head is not this run on this repo', async () => {
     const heads = [
-      ourPr({ head: { ref: 'feature/x', repo: { full_name: 'acme/eval' } } }),
-      ourPr({ head: { ref: 'adamant/run-1', repo: { full_name: 'mallory/eval' } } }),
-      ourPr({ head: { ref: 'adamant/run-1', repo: null } }),
+      ourPr({ head: { ref: 'feature/x', sha: tested, repo: { full_name: 'acme/eval' } } }),
+      ourPr({ head: { ref: 'adamant/run-1', sha: tested, repo: { full_name: 'mallory/eval' } } }),
+      ourPr({ head: { ref: 'adamant/run-1', sha: tested, repo: null } }),
       ourPr({ state: 'closed' }),
       ourPr({ merged: true }),
     ]
@@ -261,6 +267,25 @@ describe('GitHub App client', () => {
         JSON.stringify(pr),
       )
     }
+  })
+
+  it('refuses to merge when someone pushed to the branch after the sandbox passed', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/access_tokens': { token: 'ghs_minted' },
+      'PUT /pulls/7/merge': { merged: true },
+      'GET /pulls/7': ourPr({
+        head: { ref: 'adamant/run-1', sha: 'beef'.repeat(10), repo: { full_name: 'acme/eval' } },
+      }),
+    })
+
+    await assert.rejects(
+      merge(createGitHubClient(config, fetchImpl)),
+      /Refusing to merge PR #7: its head is beef.*, not the tested commit ab12/,
+    )
+    assert.equal(
+      calls.some((call) => call.method === 'PUT'),
+      false,
+    )
   })
 
   it('reports a failed call by status without echoing the response body', async () => {

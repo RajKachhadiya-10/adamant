@@ -167,8 +167,9 @@ export interface GitHubClient {
     body: string
   }): Promise<{ number: number; url: string }>
   /**
-   * Merges `prNumber` only if its head is `headRef` on this repository and
-   * it is still open. The number alone is not proof it is this run's PR.
+   * Merges `prNumber` only if its head is `headRef` on this repository at
+   * commit `headSha`, and it is still open. The number alone is not proof it is
+   * this run's PR, and the branch alone is not proof its tip was tested.
    */
   mergePullRequest(input: {
     installationId: string
@@ -176,6 +177,7 @@ export interface GitHubClient {
     name: string
     prNumber: number
     headRef: string
+    headSha: string
     commitTitle: string
   }): Promise<void>
   /** Every installation of the App, across all pages. */
@@ -205,7 +207,11 @@ export interface GitHubClient {
 interface PullRequestHead {
   readonly state: string
   readonly merged: boolean
-  readonly head: { readonly ref: string; readonly repo: { readonly full_name: string } | null }
+  readonly head: {
+    readonly ref: string
+    readonly sha: string
+    readonly repo: { readonly full_name: string } | null
+  }
 }
 
 export class GitHubApiError extends Error {
@@ -392,7 +398,15 @@ export function createGitHubClient(config: GitHubAppConfig, fetchImpl?: FetchLik
       return { number: pr.number, url: pr.html_url }
     },
 
-    async mergePullRequest({ installationId, owner, name, prNumber, headRef, commitTitle }) {
+    async mergePullRequest({
+      installationId,
+      owner,
+      name,
+      prNumber,
+      headRef,
+      headSha,
+      commitTitle,
+    }) {
       const token = await client.installationToken(installationId)
       const repo = `${encodeURIComponent(owner)}/${encodeURIComponent(name)}`
 
@@ -411,10 +425,17 @@ export function createGitHubClient(config: GitHubAppConfig, fetchImpl?: FetchLik
           `Refusing to merge PR #${prNumber}: it is ${pr.merged ? 'merged' : pr.state}.`,
         )
       }
+      if (pr.head.sha.toLowerCase() !== headSha.toLowerCase()) {
+        throw new Error(
+          `Refusing to merge PR #${prNumber}: its head is ${pr.head.sha}, not the tested commit ${headSha}.`,
+        )
+      }
 
+      // `sha` makes GitHub refuse (409) if the head moves after the read above.
       await json(token, 'PUT', `/repos/${repo}/pulls/${prNumber}/merge`, {
         merge_method: 'squash',
         commit_title: commitTitle,
+        sha: headSha,
       })
     },
 

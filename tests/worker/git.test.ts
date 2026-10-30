@@ -118,10 +118,10 @@ describe('GitWorkspace', () => {
   })
 
   it('pushes only to refs/heads/adamant/{run_id}', async () => {
-    const { calls, exec } = recordingExec()
+    const { calls, exec } = recordingExec({ stdout: `${SHA}\n` })
     const ws = await workspace(exec, 'run-abc')
 
-    await ws.push('adamant/run-abc')
+    const pushed = await ws.push('adamant/run-abc')
 
     assert.deepEqual(calls.at(-1)?.args, [
       'push',
@@ -129,6 +129,20 @@ describe('GitWorkspace', () => {
       'origin',
       'HEAD:refs/heads/adamant/run-abc',
     ])
+    // The commit the merge is later pinned to, read from the HEAD that was pushed.
+    assert.deepEqual(calls.at(-2)?.args, ['rev-parse', '--verify', 'HEAD'])
+    assert.equal(pushed, SHA)
+  })
+
+  it('pushes nothing when HEAD does not read back as a full commit SHA', async () => {
+    const { calls, exec } = recordingExec({ stdout: 'not-a-sha\n' })
+    const ws = await workspace(exec, 'run-abc')
+
+    await assert.rejects(ws.push('adamant/run-abc'), /Expected a full commit SHA/)
+    assert.equal(
+      calls.some((call) => call.args[0] === 'push'),
+      false,
+    )
   })
 
   it('refuses a push to any other branch', async () => {
