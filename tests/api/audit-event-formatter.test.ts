@@ -110,4 +110,35 @@ describe('auditEvent', () => {
       },
     })
   })
+
+  // 9. Stage progress events format into audit:run.<stage> with stage metadata and durationMs
+  it('formats healing pipeline stage progress events with stage metadata and durations', () => {
+    const stageEvents = [
+      { eventType: 'run.diagnosing', payload: { stage: 'diagnose', attempt: 1 } },
+      { eventType: 'run.diagnosed', payload: { stage: 'diagnose', attempt: 1, durationMs: 1200 } },
+      { eventType: 'run.planning', payload: { stage: 'plan', attempt: 1 } },
+      { eventType: 'run.planned', payload: { stage: 'plan', attempt: 1, durationMs: 850 } },
+      { eventType: 'run.patching', payload: { stage: 'patch', attempt: 1 } },
+      {
+        eventType: 'run.patched',
+        payload: { stage: 'patch', attempt: 1, candidateHash: 'sha-123', durationMs: 2100 },
+      },
+      {
+        eventType: 'run.sandboxing',
+        payload: { stage: 'sandbox', attempt: 1, candidateHash: 'sha-123' },
+      },
+      {
+        eventType: 'run.publishing',
+        payload: { stage: 'publish', attempt: 1, candidateHash: 'sha-123' },
+      },
+    ]
+
+    for (const { eventType, payload } of stageEvents) {
+      const event = auditEvent(makeRow({ id: 'row-stage', eventType, payload }))
+      assert.equal(event.id, 'audit_row-stage')
+      assert.equal(event.type, `audit:${eventType}`)
+      assert.deepEqual(event.payload['payload'], payload)
+      assert.equal(event.payload['runId'], 'run-abc')
+    }
+  })
 })

@@ -146,7 +146,20 @@ describe('autonomous heal loop', () => {
     assert.equal(recorder.publications[0]?.headSha, PUSHED_SHA)
     assert.deepEqual(
       recorder.audits.map((row) => row.eventType),
-      ['run.retrieved', 'run.sandboxed', 'run.pr_opened', 'run.merged'],
+      [
+        'run.retrieved',
+        'run.diagnosing',
+        'run.diagnosed',
+        'run.planning',
+        'run.planned',
+        'run.patching',
+        'run.patched',
+        'run.sandboxing',
+        'run.sandboxed',
+        'run.publishing',
+        'run.pr_opened',
+        'run.merged',
+      ],
     )
   })
 
@@ -449,5 +462,91 @@ describe('autonomous heal loop', () => {
 
     assert.equal(String(recorder.tools[0]?.args.remote).includes('ghs_'), false)
     assert.match(String(recorder.tools[0]?.args.remote), /\[redacted\]/)
+  })
+
+  it('records stage telemetry with non-negative durations and stage labels', async () => {
+    const recorder = createMemoryRecorder()
+    const graph = compileHealGraph({
+      git: fakeGit(journal()),
+      sandbox: sandboxScript([pass]),
+      llm: scriptedLlm(['diff']),
+      recorder,
+    })
+
+    await graph.invoke({ runId: 'run-stage-telemetry', repository, baseSha: 'abc' })
+
+    const events = recorder.audits.map((a) => a.eventType)
+    assert.ok(events.includes('run.diagnosing'))
+    assert.ok(events.includes('run.diagnosed'))
+    assert.ok(events.includes('run.planning'))
+    assert.ok(events.includes('run.planned'))
+    assert.ok(events.includes('run.patching'))
+    assert.ok(events.includes('run.patched'))
+    assert.ok(events.includes('run.sandboxing'))
+    assert.ok(events.includes('run.sandboxed'))
+    assert.ok(events.includes('run.publishing'))
+    assert.ok(events.includes('run.pr_opened'))
+
+    // Verify stage labels and non-negative durations
+    for (const eventType of [
+      'run.diagnosed',
+      'run.planned',
+      'run.patched',
+      'run.pr_opened',
+      'run.retrieved',
+    ]) {
+      const event = recorder.audits.find((a) => a.eventType === eventType)
+      assert.ok(event, `missing event ${eventType}`)
+      const payload = event.payload as Record<string, unknown>
+      assert.equal(typeof payload.durationMs, 'number', `${eventType} durationMs must be a number`)
+      assert.ok((payload.durationMs as number) >= 0, `${eventType} durationMs must be non-negative`)
+      assert.equal(typeof payload.stage, 'string', `${eventType} stage must be a string`)
+    }
+  })
+
+  it('does not emit run.patched when diff application fails', async () => {
+    const recorder = createMemoryRecorder()
+    const graph = compileHealGraph({
+      git: fakeGit(journal(), {
+        applyPatch: async () => {
+          throw new Error('patch does not apply')
+        },
+      }),
+      sandbox: sandboxScript([fail]),
+      llm: scriptedLlm(['invalid diff', 'second diff']),
+      recorder,
+    })
+
+    await graph.invoke({ runId: 'run-failed-patch', repository, baseSha: 'abc' })
+
+    const events = recorder.audits.map((a) => a.eventType)
+    // run.patching was emitted, but never run.patched for the failing attempt
+    assert.ok(events.includes('run.patching'))
+    assert.equal(events.filter((e) => e === 'run.patched').length, 0)
+    // No publish events should have occurred
+    assert.equal(events.includes('run.publishing'), false)
+    assert.equal(events.includes('run.pr_opened'), false)
+  })
+
+  it('emits retry stages with incremented attempt numbers', async () => {
+    const recorder = createMemoryRecorder()
+    const graph = compileHealGraph({
+      git: fakeGit(journal()),
+      sandbox: sandboxScript([fail, pass]),
+      llm: scriptedLlm(['first diff', 'second diff']),
+      recorder,
+    })
+
+    await graph.invoke({ runId: 'run-retries', repository, baseSha: 'abc' })
+
+    const patchings = recorder.audits.filter((a) => a.eventType === 'run.patching')
+    assert.equal(patchings.length, 2)
+    assert.equal((patchings[0]?.payload as Record<string, unknown>).attempt, 1)
+    assert.equal((patchings[1]?.payload as Record<string, unknown>).attempt, 2)
+
+    const sandboxings = recorder.audits.filter((a) => a.eventType === 'run.sandboxing')
+    assert.equal(sandboxings.length, 2)
+    assert.equal((sandboxings[0]?.payload as Record<string, unknown>).attempt, 1)
+    assert.equal((sandboxings[1]?.payload as Record<string, unknown>).attempt, 2)
   })
 })

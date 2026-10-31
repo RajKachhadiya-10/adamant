@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { performance } from 'node:perf_hooks'
 import { type AgentState } from './state.ts'
 import { type AgentDependencies, LlmTruncatedError, type PreviousAttempt } from './deps.ts'
 import { SecureGitClient } from './tools.ts'
@@ -34,6 +35,7 @@ export const createNodes = (deps: AgentDependencies) => {
   return {
     retrieveNode: async (state: AgentState): Promise<Partial<AgentState>> => {
       const git = gateway(state)
+      const startTime = performance.now()
       // The checkout and the log download wait on different hosts (the
       // repository, then the Actions API), so they overlap. The sources need
       // both: the parsed log names the files, the checkout holds them.
@@ -45,11 +47,14 @@ export const createNodes = (deps: AgentDependencies) => {
       // Parsed here, once. Retries reuse it instead of re-downloading the log.
       const failure = parseFailure(logs)
       const sources = await readSources((path) => git.readFile(path), failure)
+      const durationMs = Math.max(0, Math.round(performance.now() - startTime))
       await deps.recorder.audit('run.retrieved', {
+        stage: 'retrieve',
         baseSha: state.baseSha,
         location: failure.location,
         failingTests: failure.failingTests,
         sources: sources.map((source) => source.path),
+        durationMs,
       })
 
       return { failure, sources, status: 'diagnosing' }
@@ -60,10 +65,24 @@ export const createNodes = (deps: AgentDependencies) => {
         throw new Error('Failure context missing before diagnose phase')
       }
 
+      const attempt = state.attemptNumber
+      const startTime = performance.now()
+      await deps.recorder.audit('run.diagnosing', {
+        stage: 'diagnose',
+        attempt,
+      })
+
       const diagnostics = await deps.llm.diagnose({
         failure: state.failure,
         sources: state.sources,
         previousAttempt: previousAttempt(state),
+      })
+
+      const durationMs = Math.max(0, Math.round(performance.now() - startTime))
+      await deps.recorder.audit('run.diagnosed', {
+        stage: 'diagnose',
+        attempt,
+        durationMs,
       })
 
       return { diagnostics, status: 'planning' }
@@ -74,10 +93,24 @@ export const createNodes = (deps: AgentDependencies) => {
         throw new Error('Diagnostics missing before planning phase')
       }
 
+      const attempt = state.attemptNumber
+      const startTime = performance.now()
+      await deps.recorder.audit('run.planning', {
+        stage: 'plan',
+        attempt,
+      })
+
       const plan = await deps.llm.plan({
         failure: state.failure,
         sources: state.sources,
         diagnostics: state.diagnostics,
+      })
+
+      const durationMs = Math.max(0, Math.round(performance.now() - startTime))
+      await deps.recorder.audit('run.planned', {
+        stage: 'plan',
+        attempt,
+        durationMs,
       })
 
       return { plan, status: 'patching' }
@@ -94,6 +127,12 @@ export const createNodes = (deps: AgentDependencies) => {
       }
 
       const attemptNumber = state.attemptNumber + 1
+      const startTime = performance.now()
+      await deps.recorder.audit('run.patching', {
+        stage: 'patch',
+        attempt: attemptNumber,
+      })
+
       let reply: string
       try {
         reply = await deps.llm.patch({
@@ -171,6 +210,14 @@ export const createNodes = (deps: AgentDependencies) => {
         }
       }
 
+      const durationMs = Math.max(0, Math.round(performance.now() - startTime))
+      await deps.recorder.audit('run.patched', {
+        stage: 'patch',
+        attempt: attemptNumber,
+        candidateHash: hash,
+        durationMs,
+      })
+
       return {
         attemptNumber,
         candidatePatch: patch,
@@ -184,6 +231,12 @@ export const createNodes = (deps: AgentDependencies) => {
       if (!state.candidatePatch || !state.candidateHash) {
         throw new Error('Candidate patch missing before sandbox phase')
       }
+
+      await deps.recorder.audit('run.sandboxing', {
+        stage: 'sandbox',
+        attempt: state.attemptNumber,
+        candidateHash: state.candidateHash,
+      })
 
       const outcome = await deps.sandbox.runValidation({
         attemptNumber: state.attemptNumber,
@@ -213,6 +266,7 @@ export const createNodes = (deps: AgentDependencies) => {
       })
       // `adamant watch` shows each attempt's verdict; the rows above are not on the feed.
       await deps.recorder.audit('run.sandboxed', {
+        stage: 'sandbox',
         attempt: state.attemptNumber,
         verdict: outcome.verdict,
         ...(outcome.durationMs === undefined ? {} : { durationMs: outcome.durationMs }),
@@ -238,6 +292,13 @@ export const createNodes = (deps: AgentDependencies) => {
       if (!state.failure || !state.candidateHash) {
         throw new Error('Candidate missing before publish phase')
       }
+
+      const startTime = performance.now()
+      await deps.recorder.audit('run.publishing', {
+        stage: 'publish',
+        attempt: state.attemptNumber,
+        candidateHash: state.candidateHash,
+      })
 
       try {
         const git = gateway(state)
@@ -275,7 +336,15 @@ export const createNodes = (deps: AgentDependencies) => {
           candidateHash: state.candidateHash,
           headSha,
         })
-        await deps.recorder.audit('run.pr_opened', { prNumber: pr.number, prUrl: pr.url, headSha })
+        const durationMs = Math.max(0, Math.round(performance.now() - startTime))
+        await deps.recorder.audit('run.pr_opened', {
+          stage: 'publish',
+          attempt: state.attemptNumber,
+          prNumber: pr.number,
+          prUrl: pr.url,
+          headSha,
+          durationMs,
+        })
 
         return { prNumber: pr.number, prUrl: pr.url, status: 'publishing' }
       } catch (error) {
